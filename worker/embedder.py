@@ -75,8 +75,8 @@ logger = logging.getLogger("worker")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-QDRANT_HOST        = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT        = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "documents")
 EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM      = 384
@@ -87,8 +87,7 @@ BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "5"))
 BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
 HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
 
-logger.info(f"Worker Config → Kafka={KAFKA_BOOTSTRAP} Qdrant={QDRANT_HOST}:{QDRANT_PORT} BatchSize={BATCH_SIZE}")
-
+logger.info(f"Worker Config → Kafka={KAFKA_BOOTSTRAP} Qdrant={os.getenv('QDRANT_URL', 'local')} BatchSize={BATCH_SIZE}")
 # ── Prometheus Metrics ────────────────────────────────────────────────────────
 DOCS_PROCESSED    = Counter("worker_documents_processed_total", "Total documents successfully embedded")
 DOCS_FAILED       = Counter("worker_documents_failed_total",    "Total documents sent to DLQ")
@@ -100,20 +99,28 @@ QUEUE_LAG         = Gauge("worker_kafka_consumer_lag",         "Estimated Kafka 
 
 # ── Initialization guard — skipped when TESTING=true (unit tests) ─────────────
 _TESTING = os.getenv("TESTING") == "true"
-
 if not _TESTING:
     # ── Client Initialization ─────────────────────────────────────────────────
     logger.info("Initializing Qdrant client...")
-    QDRANT_API_KEY = os.getenv('QDRANT_API_KEY', '')
 
-    if QDRANT_API_KEY:
-        qdrant = QdrantClient(url=f"https://{QDRANT_HOST}", api_key=QDRANT_API_KEY)
-        logger.info(f"Connected to Qdrant Cloud: {QDRANT_HOST}")
+    QDRANT_URL = os.getenv("QDRANT_URL")
+    QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+
+    if QDRANT_URL:
+        # 🔵 Producción (Qdrant Cloud)
+        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        logger.info(f"Connected to Qdrant Cloud: {QDRANT_URL}")
     else:
-        qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        logger.info(f"Local Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+        # 🟡 Desarrollo local
+        QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+        QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 
+        qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        logger.info(f"Connected to local Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+
+    # ── Collection Setup ──────────────────────────────────────────────────────
     existing = [c.name for c in qdrant.get_collections().collections]
+
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
@@ -124,6 +131,18 @@ if not _TESTING:
     else:
         logger.info(f"Reusing collection '{COLLECTION_NAME}'.")
 
+    # ── Collection Setup ──────────────────────────────────────────────────────
+    existing = [c.name for c in qdrant.get_collections().collections]
+
+    if COLLECTION_NAME not in existing:
+        qdrant.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            sparse_vectors_config={"text-sparse": SparseVectorParams()},
+        )
+        logger.info(f"Collection '{COLLECTION_NAME}' created.")
+    else:
+        logger.info(f"Reusing collection '{COLLECTION_NAME}'.")
     # ── Model Loading ──────────────────────────────────────────────────────────
     logger.info(f"Loading dense model: {EMBEDDING_MODEL}")
     _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
@@ -214,7 +233,7 @@ if not _TESTING:
 
     start_http_server(9100)
     threading.Thread(target=start_health_server, daemon=True).start()
-
+    
 else:
     # Stubs for unit tests — no real connections made
     _tokenizer    = None
