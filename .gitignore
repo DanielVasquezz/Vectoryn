@@ -10,7 +10,7 @@ venv/
 # =========================
 # Do NOT remove this; sensitive credentials must stay out of Git
 .env
-
+.env.*
 # =========================
 # OS files
 # =========================
