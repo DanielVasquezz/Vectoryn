@@ -50,7 +50,7 @@ import time
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
+import certifi
 import torch
 from confluent_kafka import Consumer, Producer, KafkaError
 from dotenv import load_dotenv
@@ -177,35 +177,38 @@ if not _TESTING:
     KAFKA_SASL_PASS = os.getenv('KAFKA_SASL_PASSWORD', '')
 
     consumer_conf = {
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": KAFKA_GROUP_ID,
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,
-        "max.poll.interval.ms": 300000,
-    }
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
+    "group.id": KAFKA_GROUP_ID,
+    "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,
+    "max.poll.interval.ms": 300000,
 
-    if KAFKA_SASL_USER and KAFKA_SASL_PASS:
-        consumer_conf.update({
-            "security.protocol": "SASL_SSL",
-            "sasl.mechanism": "SCRAM-SHA-256",
-            "sasl.username": KAFKA_SASL_USER,
-            "sasl.password": KAFKA_SASL_PASS,
-            # ❌ FIX IMPORTANTE: NO CA FILE (rompe Aiven/Render)
-            "ssl.endpoint.identification.algorithm": "https",
-        })
+    # 🔥 FIX CRÍTICO SSL (Aiven lo exige)
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "SCRAM-SHA-256",
+    "sasl.username": KAFKA_SASL_USER,
+    "sasl.password": KAFKA_SASL_PASS,
+
+    # 🔥 ESTE ES EL FIX QUE TE FALTABA
+    "ssl.ca.location": certifi.where(),
+    "ssl.endpoint.identification.algorithm": "https",
+}
 
     consumer = Consumer(consumer_conf)
     consumer.subscribe([KAFKA_TOPIC_IN])
 
     dlq_producer = Producer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        **({
-            "security.protocol": "SASL_SSL",
-            "sasl.mechanism": "SCRAM-SHA-256",
-            "sasl.username": KAFKA_SASL_USER,
-            "sasl.password": KAFKA_SASL_PASS,
-        } if KAFKA_SASL_USER and KAFKA_SASL_PASS else {})
-    })
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
+
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "SCRAM-SHA-256",
+    "sasl.username": KAFKA_SASL_USER,
+    "sasl.password": KAFKA_SASL_PASS,
+
+    # 🔥 FIX SSL
+    "ssl.ca.location": certifi.where(),
+    "ssl.endpoint.identification.algorithm": "https",
+})
 
     # ── HEALTH SERVER ─────────────────────────────────────────────
     class HealthHandler(BaseHTTPRequestHandler):
