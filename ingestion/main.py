@@ -186,9 +186,17 @@ def _init_kafka_producer():
     producer = Producer(kafka_conf)
     logger.info("Kafka producer initialized successfully")
     return producer
-    
+
 producer = _init_kafka_producer()
+
 service_start_time = time.time()
+
+@app.on_event("shutdown")
+def shutdown_event():
+    logger.info("Flushing Kafka producer before shutdown...")
+    producer.flush(10)
+
+
 # ─────────────────────────────────────────────────────────────
 # PII SHIELD
 # ─────────────────────────────────────────────────────────────
@@ -269,12 +277,11 @@ async def ingest_document(request: Request, doc: DocumentPayload):
         span.set_attribute("doc.length", len(doc.content))
 
         try:
-            # PII Protection
             masked_content = pii_shield.mask(doc.content)
-            
+
             # Kafka message
             json_message = json.dumps({
-                "doc_id": doc.id, 
+                "doc_id": doc.id,
                 "content": masked_content
             })
 
@@ -297,5 +304,11 @@ async def ingest_document(request: Request, doc: DocumentPayload):
             }
 
         except Exception as e:
-            logger.error(f"INGEST_ERROR doc_id={doc.id} error={e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.exception(f"INGEST_ERROR doc_id={doc.id}")
+            span.record_exception(e)
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+
+            raise HTTPException(
+                status_code=500,
+                detail="Ingestion failed"
+            )

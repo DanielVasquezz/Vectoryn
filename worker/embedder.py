@@ -238,9 +238,16 @@ def send_to_dlq(payload, error):
             "error": str(error),
             "ts": time.time()
         }
-        dlq_producer.produce(KAFKA_TOPIC_FAILED, json.dumps(msg).encode())
-        dlq_producer.flush(5)
+
+        dlq_producer.produce(
+            KAFKA_TOPIC_FAILED,
+            json.dumps(msg).encode("utf-8")
+        )
+
+        dlq_producer.poll(0)
+
         DOCS_FAILED.inc()
+
     except Exception as e:
         logger.error(f"DLQ_FAILED {e}")
 
