@@ -113,29 +113,62 @@ def _setup_tracing() -> trace.Tracer:
 tracer = _setup_tracing()
 FastAPIInstrumentor.instrument_app(app)
 
-# ── Kafka Producer ────────────────────────────────────────────
-KAFKA_SASL_USER = os.getenv('KAFKA_SASL_USERNAME', '')
-KAFKA_SASL_PASS = os.getenv('KAFKA_SASL_PASSWORD', '')
+# ── Kafka Producer (Aiven Cloud Fix) ──────────────────────────
+def _init_kafka_producer():
+    # 1. Rutas para certificados temporales (necesarios en Render/Aiven)
+    cert_dir = "/tmp/kafka_certs"
+    os.makedirs(cert_dir, exist_ok=True)
+    
+    ca_path = os.path.join(cert_dir, "ca.pem")
+    cert_path = os.path.join(cert_dir, "service.cert")
+    key_path = os.path.join(cert_dir, "service.key")
 
-kafka_conf = {
-    'bootstrap.servers': KAFKA_BOOTSTRAP,
-    'client.id': 'vectoryn-ingestion-v2',
-    'acks': 'all',
-    'retries': 3,
-    'delivery.timeout.ms': 10000,
-}
+    # 2. Intentar leer certificados de variables de entorno
+    ca_data = os.getenv("KAFKA_CA_CERT")
+    cert_data = os.getenv("KAFKA_ACCESS_CERT")
+    key_data = os.getenv("KAFKA_ACCESS_KEY")
 
-# Cloud Kafka (Aiven / Upstash) uses SASL_SSL — enable if credentials exist
-if KAFKA_SASL_USER and KAFKA_SASL_PASS:
-    kafka_conf.update({
-        'security.protocol': 'SASL_SSL',
-        'sasl.mechanism': 'SCRAM-SHA-256',
-        'sasl.username': KAFKA_SASL_USER,
-        'sasl.password': KAFKA_SASL_PASS,
-        'ssl.ca.location': '/usr/local/share/ca-certificates/aiven-ca.crt',
-    })
-    logger.info('Kafka SASL/SSL enabled (cloud mode — Aiven/Upstash)')
-producer = Producer(kafka_conf)
+    kafka_conf = {
+        'bootstrap.servers': KAFKA_BOOTSTRAP,
+        'client.id': 'vectoryn-ingestion-v2',
+        'acks': 'all',
+        'retries': 3,
+        'delivery.timeout.ms': 10000,
+    }
+
+    # 3. Si existen los certificados, usamos el protocolo SSL (mTLS) de Aiven
+    if ca_data and cert_data and key_data:
+        try:
+            with open(ca_path, "w") as f: f.write(ca_data)
+            with open(cert_path, "w") as f: f.write(cert_data)
+            with open(key_path, "w") as f: f.write(key_data)
+            
+            kafka_conf.update({
+                'security.protocol': 'SSL',
+                'ssl.ca.location': ca_path,
+                'ssl.certificate.location': cert_path,
+                'ssl.key.location': key_path,
+                'ssl.endpoint.identification.algorithm': 'https',
+            })
+            logger.info('Kafka mTLS SSL enabled (Cloud mode — Aiven)')
+        except Exception as e:
+            logger.error(f"Error writing Kafka certificates: {e}")
+    else:
+        # Fallback para local o SASL si aún usas credenciales viejas
+        KAFKA_SASL_USER = os.getenv('KAFKA_SASL_USERNAME', '')
+        KAFKA_SASL_PASS = os.getenv('KAFKA_SASL_PASSWORD', '')
+        if KAFKA_SASL_USER and KAFKA_SASL_PASS:
+            kafka_conf.update({
+                'security.protocol': 'SASL_SSL',
+                'sasl.mechanism': 'SCRAM-SHA-256',
+                'sasl.username': KAFKA_SASL_USER,
+                'sasl.password': KAFKA_SASL_PASS,
+            })
+            logger.info('Kafka SASL/SSL enabled (Legacy/Upstash mode)')
+
+    return Producer(kafka_conf)
+
+producer = _init_kafka_producer()
 service_start_time = time.time()
 
 # ── PII Shield ────────────────────────────────────────────────
