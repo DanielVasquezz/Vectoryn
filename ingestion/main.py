@@ -3,8 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import re
 from dotenv import load_dotenv
+import os
+import time
+import uuid
+import json
+import certifi
+import logging
 
 load_dotenv()
+
 from pydantic import BaseModel, field_validator
 from confluent_kafka import Producer
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -17,27 +24,22 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
-import json
-import uuid
-import os
-import time
-import logging
-import certifi
 
+# Configuración de logging
 logging.basicConfig(
     level=logging.INFO,
-    format='{"time": "%(asctime)s", "level": "%(levelname)s", "service": "ingestion", "message": "%(message)s"}'
+    format='{"time": "%(asctime)s", "levelname": "%(levelname)s", "service": "ingestion", "message": "%(message)s"}'
 )
 logger = logging.getLogger("ingestion")
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP   = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-ALLOWED_ORIGINS   = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:5500").split(",")
-KAFKA_TOPIC       = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
-JAEGER_ENDPOINT   = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-VECTORYN_API_KEY  = os.getenv("VECTORYN_API_KEY")
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:5500").split(",")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
+JAEGER_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+VECTORYN_API_KEY = os.getenv("VECTORYN_API_KEY")
 
 logger.info(f"Config → Kafka: {KAFKA_BOOTSTRAP} | Topic: {KAFKA_TOPIC}")
 logger.info(f"CORS → Allowed origins: {ALLOWED_ORIGINS}")
@@ -121,7 +123,7 @@ FastAPIInstrumentor.instrument_app(app)
 # KAFKA PRODUCER (AIVEND CLOUD + SASL_SSL FIX)
 # ─────────────────────────────────────────────────────────────
 def _init_kafka_producer():
-    # Base config
+    # Configuración base
     kafka_conf = {
         'bootstrap.servers': KAFKA_BOOTSTRAP,
         'client.id': 'vectoryn-ingestion-v2',
@@ -130,7 +132,7 @@ def _init_kafka_producer():
         'delivery.timeout.ms': 10000,
     }
 
-    # 🔥 FIX 1: Check for mTLS certs (Aiven Cloud)
+    # 🔥 FIX 1: Verificación certificados mTLS (Aiven Cloud)
     ca_data = os.getenv("KAFKA_CA_CERT")
     cert_data = os.getenv("KAFKA_ACCESS_CERT")
     key_data = os.getenv("KAFKA_ACCESS_KEY")
@@ -291,5 +293,4 @@ async def ingest_document(request: Request, doc: DocumentPayload):
 
         except Exception as e:
             logger.error(f"INGEST_ERROR doc_id={doc.id} error={e}")
-            span.record_exception(e)
             raise HTTPException(status_code=500, detail=str(e))
