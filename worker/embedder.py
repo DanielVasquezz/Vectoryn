@@ -157,7 +157,7 @@ if not _TESTING:
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
 
     # Warmup del modelo
-    import torch
+    
     with torch.inference_mode():
         inp = _tokenizer("warmup", return_tensors="pt")
         _ = _model(**inp)
@@ -166,18 +166,26 @@ if not _TESTING:
     KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
     KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
 
+    ca_data = os.getenv("KAFKA_CA_CERT")
+
+    ca_path = None
+    if ca_data:
+        ca_path = "/tmp/aiven-ca.pem"
+        with open(ca_path, "w") as f:
+            f.write(ca_data)
+
     consumer_conf = {
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "group.id": KAFKA_GROUP_ID,
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": KAFKA_USER,
-        "sasl.password": KAFKA_PASS,
-        "ssl.ca.location": certifi.where(),
-        "ssl.endpoint.identification.algorithm": "https",
-    }
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
+    "group.id": KAFKA_GROUP_ID,
+    "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "SCRAM-SHA-256",
+    "sasl.username": KAFKA_USER,
+    "sasl.password": KAFKA_PASS,
+    "ssl.ca.location": ca_path if ca_path else certifi.where(),
+    "ssl.endpoint.identification.algorithm": "https",
+}
 
     from confluent_kafka import Consumer, Producer
     consumer = Consumer(consumer_conf)
