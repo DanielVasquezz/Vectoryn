@@ -162,67 +162,86 @@ if not _TESTING:
         inp = _tokenizer("warmup", return_tensors="pt")
         _ = _model(**inp)
 
-    # Config Kafka SASL_SSL
-    KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
-    KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
+# Config Kafka SASL_SSL
+KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
+KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
 
-    ca_data = os.getenv("KAFKA_CA_CERT")
+# ── CA CERT HANDLING (SAFE + PRODUCTION READY)
+ca_data = os.getenv("KAFKA_CA_CERT")
 
-    ca_path = None
-    if ca_data:
-        ca_path = "/tmp/aiven-ca.pem"
-        with open(ca_path, "w") as f:
-            f.write(ca_data)
+if ca_data:
+    ca_path = "/tmp/aiven-ca.pem"
+    with open(ca_path, "w") as f:
+        f.write(ca_data.strip())
+else:
+    ca_path = os.getenv("KAFKA_CA_CERT_PATH", certifi.where())
 
-    consumer_conf = {
+# ─────────────────────────────────────────────
+# CONSUMER CONFIG
+# ─────────────────────────────────────────────
+consumer_conf = {
     "bootstrap.servers": KAFKA_BOOTSTRAP,
     "group.id": KAFKA_GROUP_ID,
     "auto.offset.reset": "earliest",
     "enable.auto.commit": False,
+
+    # Security
     "security.protocol": "SASL_SSL",
     "sasl.mechanism": "SCRAM-SHA-256",
     "sasl.username": KAFKA_USER,
     "sasl.password": KAFKA_PASS,
-    "ssl.ca.location": ca_path if ca_path else certifi.where(),
+
+    # TLS
+    "ssl.ca.location": ca_path,
     "ssl.endpoint.identification.algorithm": "https",
 }
 
-    from confluent_kafka import Consumer, Producer
-    consumer = Consumer(consumer_conf)
-    consumer.subscribe([KAFKA_TOPIC_IN])
+from confluent_kafka import Consumer, Producer
 
-    dlq_producer = Producer({
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": KAFKA_USER,
-        "sasl.password": KAFKA_PASS,
-        "ssl.ca.location": certifi.where(),
-        "ssl.endpoint.identification.algorithm": "https",
-    })
+consumer = Consumer(consumer_conf)
+consumer.subscribe([KAFKA_TOPIC_IN])
 
-    # Servidor HTTP health
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == "/health":
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'{"status":"healthy"}')
-            else:
-                self.send_response(404)
-                self.end_headers()
+# ─────────────────────────────────────────────
+# DLQ PRODUCER CONFIG
+# ─────────────────────────────────────────────
+dlq_producer = Producer({
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
 
-        def log_message(self, *args): pass
+    # Security
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "SCRAM-SHA-256",
+    "sasl.username": KAFKA_USER,
+    "sasl.password": KAFKA_PASS,
 
-    def start_health():
-        HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler).serve_forever()
+    # TLS (IMPORTANT: same CA)
+    "ssl.ca.location": ca_path,
+    "ssl.endpoint.identification.algorithm": "https",
+})
 
-    import threading
-    start_http_server(9100)
-    threading.Thread(target=start_health, daemon=True).start()
-else:
-    _tokenizer = _model = _sparse_model = None
-    qdrant = consumer = dlq_producer = chunker = None
+# ─────────────────────────────────────────────
+# HEALTH SERVER
+# ─────────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"healthy"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_health():
+    HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler).serve_forever()
+
+
+import threading
+start_http_server(9100)
+threading.Thread(target=start_health, daemon=True).start()
 
 # ─────────────────────────────────────────────────────────────
 # FUNCIONES DE EMBEDDING
