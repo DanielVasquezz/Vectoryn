@@ -79,6 +79,15 @@ HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
 
 _TESTING = os.getenv("TESTING") == "true"
 
+# These are declared at module level so @patch("worker.embedder._model") etc.
+# can find them during unit tests (TESTING=true). They are assigned real objects
+# inside the `if not _TESTING` block below when running in production.
+_tokenizer = None
+_model = None
+_sparse_model = None
+qdrant = None
+chunker = None
+
 # ─────────────────────────────────────────────────────────────
 # PROMETHEUS METRICS
 # ─────────────────────────────────────────────────────────────
@@ -371,3 +380,4 @@ if not _TESTING:
     consumer.close()
     dlq_producer.flush(10)
     logger.info("Worker shut down cleanly.")
+    
