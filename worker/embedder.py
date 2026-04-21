@@ -233,7 +233,6 @@ if not _TESTING:
 
     start_http_server(9100)
     threading.Thread(target=start_health_server, daemon=True).start()
-    
 else:
     # Stubs for unit tests — no real connections made
     _tokenizer    = None

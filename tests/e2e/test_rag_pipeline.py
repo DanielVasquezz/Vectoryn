@@ -10,9 +10,9 @@ import uuid
 # "TestContainers" to spin up:
 #   1. A Redpanda (Kafka) container
 #   2. A Qdrant container
-# 
+#
 # Why? Because we want to test the absolute TRUTH:
-# ensuring that bytes travel from one service to another without 
+# ensuring that bytes travel from one service to another without
 # corruption. Mocks can lie; real containers don't.
 # ============================================================
 
@@ -25,7 +25,7 @@ def test_full_rag_pipeline_smoke_test():
     # 1. Ingest a unique document
     doc_id = str(uuid.uuid4())
     content = f"The Vectoryn secret code for test {doc_id} is 'BIG-TECH-700K'."
-    
+
     # Here we would call the real Ingestion API (localhost:8000)
     # response = httpx.post("http://localhost:8000/ingest", json={"content": content})
     # assert response.status_code == 200
