@@ -1,5 +1,5 @@
 # Vectoryn — Ruff Configuration
-# line-length 120 is standard in modern enterprise projects (Google, Meta, Stripe)
+# line-length 120 is standard in modern enterprise projects
 line-length = 120
 
 [lint]
@@ -7,8 +7,9 @@ select = ["E", "W", "F"]
 ignore = [
     "E501",  # line too long — handled by line-length = 120
     "E402",  # module-level import not at top — intentional (load_dotenv before imports)
-    "F841",  # local variable assigned but never used — removed in code fixes below
+    "F841",  # local variable assigned but never used
 ]
 
 [lint.per-file-ignores]
 "tests/*" = ["E402", "F401", "F811"]
+"worker/embedder.py" = ["E402"]   # confluent_kafka imported after CA cert setup

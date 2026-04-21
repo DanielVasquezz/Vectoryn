@@ -1,226 +1,106 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v3.0 (Optimized)
+worker/embedder.py — Vectoryn Embedding Worker v3.1 (Fixed)
 =================================================================
 
-CHANGES vs original v2.0:
---------------------------
+FIXES vs v3.0:
+--------------
+1. DUPLICATE IMPORT FIXED (F811 ruff error)
+   Removed duplicate `import threading` that was at line 242 — caused CI failure.
+   threading is now imported ONCE at the top of the file.
 
-1. TRUE BATCH PROCESSING
-   Original: Processed 1 document at a time.
-   Now: Accumulates up to BATCH_SIZE Kafka messages and processes them
-   together. ML models are dramatically more efficient in batches:
-   - 1 doc:   ~200ms
-   - 10 docs: ~350ms (35ms/doc instead of 200ms)
-   Throughput: 5 docs/s → ~28 docs/s
+2. DUPLICATE TORCH IMPORT FIXED
+   Removed `import torch` inside embed_dense_batch() — already at module level.
 
-2. MODEL WARMUP
-   Original: The first document took 2-3x longer because models
-   weren't at "operating temperature" (cold CUDA cache).
-   Now: We execute a dummy forward pass on startup with a test
-   string to warm up CUDA/CPU kernels.
+3. SSL / KAFKA CA CERT HANDLING IMPROVED
+   Prioritizes KAFKA_CA_CERT env var (Aiven PEM content as string), writes it
+   to /tmp/aiven-ca.pem. Falls back to KAFKA_CA_CERT_PATH, then certifi.
+   Works perfectly on Render (no persistent filesystem needed).
 
-3. PROMETHEUS METRICS IN WORKER
-   Original: Zero metrics in the worker — a blind spot in Grafana.
-   Now: Processed docs counter, latency histogram, and throughput
-   gauge. You can now see in Grafana if the worker is lagging.
+4. HEALTH SERVER STARTED BEFORE KAFKA CONNECTIONS
+   Render health-checks /health during container boot. Server now starts
+   before the Kafka consumer is initialized so boot health checks never fail.
 
-4. GRACEFUL SHUTDOWN
-   Original: Simple KeyboardInterrupt.
-   Now: Signal handlers for SIGTERM (docker stop) and SIGINT.
-   Docker waits 10s by default → the worker finishes the current
-   batch before exiting, preventing orphaned messages.
+5. CLEAN SHUTDOWN
+   consumer.close() then dlq_producer.flush() in correct order.
+   Signal handlers renamed to avoid shadowing builtins.
 
-5. MANUAL OFFSET COMMIT
-   Original: Auto-commit (could process a message, crash before
-   commit, and lose it).
-   Now: Commit AFTER successful upsert → guaranteed at-least-once delivery.
-
-6. EMBEDDED HTTP HEALTH CHECK
-   Original: No health check → Docker couldn't know if the worker
-   was running or deadlocked.
-   Now: Separate thread with a minimal HTTP server on :8002 that
-   responds to /health — enables docker-compose healthchecks.
+6. L2 NORMALIZATION ADDED TO DENSE EMBEDDINGS
+   Ensures cosine similarity works correctly in Qdrant.
 """
 import os
-import threading
 import signal
+import threading
 import time
 import uuid
 import json
 import logging
 
-import torch
 import certifi
+import torch
+import torch.nn.functional as F
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Importar clases necesarias de qdrant-client
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     VectorParams,
-    SparseVector,
     SparseVectorParams,
+    SparseVector,
     PointStruct,
 )
-# Para métricas Prometheus
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
-
-# Variables de entorno y configuración
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuración general
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-KAFKA_TOPIC_IN = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
-KAFKA_TOPIC_FAILED = os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
-KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v3")
-
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "documents")
-
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDING_DIM = 384
-
-BATCH_SIZE = int(os.getenv("WORKER_BATCH_SIZE", "5"))
-BATCH_TIMEOUT_MS = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
-HEALTH_PORT = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
-
-_TESTING = os.getenv("TESTING") == "true"
-
-logger = logging.getLogger("worker")
+# ─────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format='{"time": "%(asctime)s", "levelname": "%(levelname)s", "service": "worker", "message": "%(message)s"}'
 )
+logger = logging.getLogger("worker")
 
 # ─────────────────────────────────────────────────────────────
-# METRICS PROMETHEUS
+# CONFIG
 # ─────────────────────────────────────────────────────────────
-DOCS_PROCESSED = Counter("worker_documents_processed_total", "Docs processed")
-DOCS_FAILED = Counter("worker_documents_failed_total", "Docs failed")
-CHUNKS_CREATED = Counter("worker_chunks_created_total", "Chunks created")
+KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC_IN     = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
+KAFKA_TOPIC_FAILED = os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
+KAFKA_GROUP_ID     = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v3")
 
-EMBED_LATENCY = Histogram(
+QDRANT_URL         = os.getenv("QDRANT_URL")
+QDRANT_API_KEY     = os.getenv("QDRANT_API_KEY")
+COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "documents")
+
+EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIM      = 384
+
+BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "5"))
+BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
+HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
+
+_TESTING = os.getenv("TESTING") == "true"
+
+# ─────────────────────────────────────────────────────────────
+# PROMETHEUS METRICS
+# ─────────────────────────────────────────────────────────────
+DOCS_PROCESSED    = Counter("worker_documents_processed_total", "Docs processed")
+DOCS_FAILED       = Counter("worker_documents_failed_total", "Docs failed")
+CHUNKS_CREATED    = Counter("worker_chunks_created_total", "Chunks created")
+EMBED_LATENCY     = Histogram(
     "worker_embedding_latency_seconds",
     "Embedding latency",
-    buckets=[0.1, 0.5, 1, 2, 5, 10]
+    buckets=[0.1, 0.5, 1, 2, 5, 10],
 )
-
 WORKER_THROUGHPUT = Gauge("worker_throughput_docs_per_second", "Throughput")
 
 
 # ─────────────────────────────────────────────────────────────
-# INICIALIZACIÓN (skip tests)
+# HEALTH SERVER  (started FIRST — Render checks /health during boot)
 # ─────────────────────────────────────────────────────────────
-if not _TESTING:
-    logger.info("Initializing Qdrant...")
-
-    if QDRANT_URL:
-        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-    else:
-        qdrant = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", "6333"))
-        )
-
-    # Crear colección si no existe
-    existing = [c.name for c in qdrant.get_collections().collections]
-    if COLLECTION_NAME not in existing:
-        qdrant.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=EMBEDDING_DIM,
-                distance=Distance.COSINE
-            ),
-            sparse_vectors_config={"text-sparse": SparseVectorParams()},
-        )
-
-    # Cargar modelo transformer
-    from transformers import AutoTokenizer, AutoModel
-    _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
-    _model = AutoModel.from_pretrained(EMBEDDING_MODEL)
-    _model.eval()
-
-    # Modelo sparse si habilitado
-    ENABLE_SPARSE = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
-    if ENABLE_SPARSE:
-        from fastembed import SparseTextEmbedding
-        _sparse_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
-    else:
-        _sparse_model = None
-
-    # Chunker (de tu código)
-    from ingestion.chunker import SemanticChunker
-    chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
-
-    # Warmup del modelo
-
-    with torch.inference_mode():
-        inp = _tokenizer("warmup", return_tensors="pt")
-        _ = _model(**inp)
-
-# Config Kafka SASL_SSL
-KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
-KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
-
-# ── CA CERT HANDLING (SAFE + PRODUCTION READY)
-ca_data = os.getenv("KAFKA_CA_CERT")
-
-if ca_data:
-    ca_path = "/tmp/aiven-ca.pem"
-    with open(ca_path, "w") as f:
-        f.write(ca_data.strip())
-else:
-    ca_path = os.getenv("KAFKA_CA_CERT_PATH", certifi.where())
-
-# ─────────────────────────────────────────────
-# CONSUMER CONFIG
-# ─────────────────────────────────────────────
-consumer_conf = {
-    "bootstrap.servers": KAFKA_BOOTSTRAP,
-    "group.id": KAFKA_GROUP_ID,
-    "auto.offset.reset": "earliest",
-    "enable.auto.commit": False,
-
-    # Security
-    "security.protocol": "SASL_SSL",
-    "sasl.mechanism": "SCRAM-SHA-256",
-    "sasl.username": KAFKA_USER,
-    "sasl.password": KAFKA_PASS,
-
-    # TLS
-    "ssl.ca.location": ca_path,
-    "ssl.endpoint.identification.algorithm": "https",
-}
-
-from confluent_kafka import Consumer, Producer
-
-consumer = Consumer(consumer_conf)
-consumer.subscribe([KAFKA_TOPIC_IN])
-
-# ─────────────────────────────────────────────
-# DLQ PRODUCER CONFIG
-# ─────────────────────────────────────────────
-dlq_producer = Producer({
-    "bootstrap.servers": KAFKA_BOOTSTRAP,
-
-    # Security
-    "security.protocol": "SASL_SSL",
-    "sasl.mechanism": "SCRAM-SHA-256",
-    "sasl.username": KAFKA_USER,
-    "sasl.password": KAFKA_PASS,
-
-    # TLS (IMPORTANT: same CA)
-    "ssl.ca.location": ca_path,
-    "ssl.endpoint.identification.algorithm": "https",
-})
-
-# ─────────────────────────────────────────────
-# HEALTH SERVER
-# ─────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -232,56 +112,137 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, *args):
-        pass
+        pass  # silence access logs
 
 
-def start_health():
+def _run_health_server():
     HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler).serve_forever()
 
 
-import threading
 start_http_server(9100)
-threading.Thread(target=start_health, daemon=True).start()
+threading.Thread(target=_run_health_server, daemon=True).start()
+logger.info(f"Health server on :{HEALTH_PORT} | Prometheus on :9100")
+
 
 # ─────────────────────────────────────────────────────────────
-# FUNCIONES DE EMBEDDING
+# CA CERT  (Aiven env-var → /tmp; else certifi)
 # ─────────────────────────────────────────────────────────────
-def embed_dense_batch(texts):
-    inputs = _tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
-    import torch
+_ca_data = os.getenv("KAFKA_CA_CERT", "").strip()
+
+if _ca_data:
+    _ca_path = "/tmp/aiven-ca.pem"
+    with open(_ca_path, "w") as _fh:
+        _fh.write(_ca_data)
+    logger.info("Kafka CA cert loaded from KAFKA_CA_CERT → /tmp/aiven-ca.pem")
+else:
+    _ca_path = os.getenv("KAFKA_CA_CERT_PATH", certifi.where())
+    logger.info(f"Kafka CA cert: {_ca_path}")
+
+
+# ─────────────────────────────────────────────────────────────
+# KAFKA CONSUMER + DLQ PRODUCER
+# ─────────────────────────────────────────────────────────────
+from confluent_kafka import Consumer, Producer  # noqa: E402  (after dotenv load)
+
+_KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
+
+_kafka_ssl_conf = {
+    "bootstrap.servers": KAFKA_BOOTSTRAP,
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "SCRAM-SHA-256",
+    "sasl.username": _KAFKA_USER,
+    "sasl.password": _KAFKA_PASS,
+    "ssl.ca.location": _ca_path,
+    "ssl.endpoint.identification.algorithm": "https",
+}
+
+consumer = Consumer({
+    **_kafka_ssl_conf,
+    "group.id": KAFKA_GROUP_ID,
+    "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,
+})
+consumer.subscribe([KAFKA_TOPIC_IN])
+
+dlq_producer = Producer(_kafka_ssl_conf)
+
+
+# ─────────────────────────────────────────────────────────────
+# ML MODELS + QDRANT  (skipped during unit tests)
+# ─────────────────────────────────────────────────────────────
+if not _TESTING:
+    logger.info("Initializing Qdrant...")
+
+    if QDRANT_URL:
+        qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    else:
+        qdrant = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", "6333")),
+        )
+
+    existing = [c.name for c in qdrant.get_collections().collections]
+    if COLLECTION_NAME not in existing:
+        qdrant.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            sparse_vectors_config={"text-sparse": SparseVectorParams()},
+        )
+        logger.info(f"Collection '{COLLECTION_NAME}' created.")
+
+    from transformers import AutoTokenizer, AutoModel  # noqa: E402
+
+    _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
+    _model = AutoModel.from_pretrained(EMBEDDING_MODEL)
+    _model.eval()
+
+    ENABLE_SPARSE = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
+    if ENABLE_SPARSE:
+        from fastembed import SparseTextEmbedding  # noqa: E402
+        _sparse_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
+    else:
+        _sparse_model = None
+
+    from ingestion.chunker import SemanticChunker  # noqa: E402
+    chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
+
+    # Warmup
+    with torch.inference_mode():
+        _inp = _tokenizer("warmup", return_tensors="pt")
+        _ = _model(**_inp)
+    logger.info("Model warmup complete — worker ready.")
+
+
+# ─────────────────────────────────────────────────────────────
+# EMBEDDING
+# ─────────────────────────────────────────────────────────────
+def embed_dense_batch(texts: list) -> list:
+    inputs = _tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
     with torch.inference_mode():
         out = _model(**inputs)
     mask = inputs["attention_mask"].unsqueeze(-1).expand(out.last_hidden_state.size()).float()
     emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
-    return emb.tolist()
+    return F.normalize(emb, p=2, dim=1).tolist()
+
 
 # ─────────────────────────────────────────────────────────────
-# DLQ (Dead Letter Queue)
+# DEAD LETTER QUEUE
 # ─────────────────────────────────────────────────────────────
-def send_to_dlq(payload, error):
+def send_to_dlq(payload: dict, error: Exception):
     try:
-        msg = {
-            "original": payload,
-            "error": str(error),
-            "ts": time.time()
-        }
-
-        dlq_producer.produce(
-            KAFKA_TOPIC_FAILED,
-            json.dumps(msg).encode("utf-8")
-        )
-
+        msg = {"original": payload, "error": str(error), "ts": time.time()}
+        dlq_producer.produce(KAFKA_TOPIC_FAILED, json.dumps(msg).encode("utf-8"))
         dlq_producer.poll(0)
-
         DOCS_FAILED.inc()
+    except Exception as dlq_err:
+        logger.error(f"DLQ_FAILED {dlq_err}")
 
-    except Exception as e:
-        logger.error(f"DLQ_FAILED {e}")
 
 # ─────────────────────────────────────────────────────────────
-# PROCESAR BATCH
+# BATCH PROCESSOR
 # ─────────────────────────────────────────────────────────────
-def process_batch(messages):
+def process_batch(messages: list):
     if not messages:
         return
 
@@ -294,8 +255,8 @@ def process_batch(messages):
         except Exception:
             continue
 
-    all_chunks = []
-    meta = []
+    all_chunks: list = []
+    meta: list = []
 
     for p in payloads:
         try:
@@ -315,19 +276,15 @@ def process_batch(messages):
         sparse = list(_sparse_model.embed(all_chunks)) if _sparse_model else None
 
     points = []
-
     for i, text in enumerate(all_chunks):
         doc_id, idx, total = meta[i]
-
         vec = {"": dense[i]}
-
         if sparse:
             s = sparse[i]
             vec["text-sparse"] = SparseVector(
                 indices=s.indices.tolist(),
-                values=s.values.tolist()
+                values=s.values.tolist(),
             )
-
         points.append(PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{idx}")),
             vector=vec,
@@ -336,8 +293,8 @@ def process_batch(messages):
                 "content": text,
                 "chunk_index": idx,
                 "total_chunks": total,
-                "ts": time.time()
-            }
+                "ts": time.time(),
+            },
         ))
 
     try:
@@ -345,38 +302,44 @@ def process_batch(messages):
         DOCS_PROCESSED.inc(len(payloads))
         WORKER_THROUGHPUT.set(len(payloads) / max(time.time() - start_time, 1))
         consumer.commit()
-        logger.info(f"BATCH_DONE docs={len(payloads)}")
+        logger.info(f"BATCH_DONE docs={len(payloads)} chunks={len(points)}")
     except Exception as e:
         for p in payloads:
             send_to_dlq(p, e)
 
+
 # ─────────────────────────────────────────────────────────────
-# LOOP PRINCIPAL
+# MAIN LOOP
 # ─────────────────────────────────────────────────────────────
 _running = True
 
-def stop(*_):
+
+def _handle_stop(*_):
     global _running
     _running = False
 
-signal.signal(signal.SIGINT, stop)
-signal.signal(signal.SIGTERM, stop)
+
+signal.signal(signal.SIGINT, _handle_stop)
+signal.signal(signal.SIGTERM, _handle_stop)
 
 if not _TESTING:
-    buffer = []
-    last_time = time.time()
+    buffer: list = []
+    last_flush = time.time()
+
+    logger.info("Worker started — consuming messages...")
 
     while _running:
         msg = consumer.poll(0.1)
 
         if msg is None:
-            if buffer and (time.time() - last_time) * 1000 > BATCH_TIMEOUT_MS:
+            if buffer and (time.time() - last_flush) * 1000 > BATCH_TIMEOUT_MS:
                 process_batch(buffer)
                 buffer = []
-                last_time = time.time()
+                last_flush = time.time()
             continue
 
         if msg.error():
+            logger.warning(f"KAFKA_MSG_ERROR {msg.error()}")
             continue
 
         buffer.append(msg)
@@ -384,11 +347,12 @@ if not _TESTING:
         if len(buffer) >= BATCH_SIZE:
             process_batch(buffer)
             buffer = []
-            last_time = time.time()
+            last_flush = time.time()
 
-    # Procesar resto
+    # Drain remaining messages
     if buffer:
         process_batch(buffer)
 
     consumer.close()
+    dlq_producer.flush(10)
     logger.info("Worker shut down cleanly.")

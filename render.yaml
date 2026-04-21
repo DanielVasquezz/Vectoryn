@@ -19,6 +19,10 @@ services:
         sync: false
       - key: KAFKA_SASL_PASSWORD
         sync: false
+      # KAFKA_CA_CERT: paste the full content of your Aiven CA certificate here
+      # (the entire contents of aiven-ca.pem as a single env var, newlines included)
+      - key: KAFKA_CA_CERT
+        sync: false
       - key: KAFKA_TOPIC_INGEST
         value: raw-documents
       - key: KAFKA_TOPIC_FAILED
@@ -107,7 +111,9 @@ services:
       - key: OTEL_EXPORTER_OTLP_ENDPOINT
         value: ""
 
-  # ── WORKER (web service — Render free tier no permite background workers) ──
+  # ── WORKER ────────────────────────────────────────────────
+  # Runs as a web service on Render free tier (background workers require paid plan).
+  # Health check is served on port WORKER_HEALTH_PORT (default 8002).
   - type: web
     name: vectoryn-worker
     runtime: docker
@@ -123,6 +129,9 @@ services:
         sync: false
       - key: KAFKA_SASL_PASSWORD
         sync: false
+      # KAFKA_CA_CERT: same Aiven CA cert as ingestion (full PEM content)
+      - key: KAFKA_CA_CERT
+        sync: false
       - key: KAFKA_TOPIC_INGEST
         value: raw-documents
       - key: KAFKA_TOPIC_FAILED
@@ -136,9 +145,6 @@ services:
         sync: false
       - key: QDRANT_COLLECTION
         value: documents
-      # Redis → Upstash
-      - key: REDIS_URL
-        sync: false
       # Worker config
       - key: EMBEDDING_MODEL
         value: sentence-transformers/all-MiniLM-L6-v2
@@ -146,6 +152,8 @@ services:
         value: "3"
       - key: WORKER_BATCH_TIMEOUT_MS
         value: "500"
+      - key: WORKER_HEALTH_PORT
+        value: "8002"
       - key: OMP_NUM_THREADS
         value: "1"
       - key: TOKENIZERS_PARALLELISM
