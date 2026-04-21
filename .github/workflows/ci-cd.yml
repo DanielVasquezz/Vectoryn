@@ -16,8 +16,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # NOTE: IMAGE_BASE se define aquí solo como referencia; los tags reales
-  # se generan en el paso "Set lowercase image base" con tr lowercase.
   IMAGE_BASE: ghcr.io/${{ github.repository }}
 
 jobs:
@@ -49,8 +47,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pytest-asyncio pytest-cov httpx mock ruff
+          pip install pytest pytest-asyncio pytest-cov httpx mock ruff certifi
           pip install -r ingestion/requirements.txt
+          # torch CPU-only must be installed BEFORE worker/requirements.txt
+          # because worker/embedder.py imports torch at module level.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r worker/requirements.txt
           pip install -r search/requirements.txt
 
@@ -113,9 +114,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # FIX PRINCIPAL: Convertir el nombre del repo a minúsculas
-      # github.repository puede ser "DanielVasquezz/Vectoryn" y Docker
-      # exige que todos los tags sean lowercase → ERROR sin este paso
+      # FIX: Convert repo name to lowercase — Docker tags must be lowercase.
       - name: Set lowercase image base
         id: image
         run: |
@@ -126,7 +125,6 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # Usamos el output lowercase del paso anterior
           images: ${{ steps.image.outputs.base }}
           tags: |
             type=sha,prefix=sha-,format=short
@@ -234,9 +232,6 @@ jobs:
           PYEOF
 
   # ── JOB 4: Deploy ────────────────────────────────────────────────────────
-  # This job runs but prints a notice if SSH secrets are not configured.
-  # To enable real deployment: add DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
-  # in Settings > Secrets and variables > Actions.
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest

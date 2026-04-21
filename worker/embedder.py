@@ -1,31 +1,26 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v3.1 (Fixed)
+worker/embedder.py — Vectoryn Embedding Worker v3.2
 =================================================================
 
-FIXES vs v3.0:
+FIXES vs v3.1:
 --------------
-1. DUPLICATE IMPORT FIXED (F811 ruff error)
-   Removed duplicate `import threading` that was at line 242 — caused CI failure.
-   threading is now imported ONCE at the top of the file.
+1. TORCH IMPORT GUARD (MAIN FIX — CI BREAKAGE)
+   torch and torch.nn.functional are now imported at the TOP unconditionally,
+   but worker/requirements.txt now also lists torch so CI can install it.
+   The test file mocks sys.modules["torch"] BEFORE this module is imported,
+   so the mock takes effect correctly.
 
-2. DUPLICATE TORCH IMPORT FIXED
-   Removed `import torch` inside embed_dense_batch() — already at module level.
+2. SSL / KAFKA CA CERT — same robust logic as v3.1.
+   Prioritizes KAFKA_CA_CERT env var (PEM string), writes to /tmp/aiven-ca.pem.
+   Falls back to KAFKA_CA_CERT_PATH, then certifi.
 
-3. SSL / KAFKA CA CERT HANDLING IMPROVED
-   Prioritizes KAFKA_CA_CERT env var (Aiven PEM content as string), writes it
-   to /tmp/aiven-ca.pem. Falls back to KAFKA_CA_CERT_PATH, then certifi.
-   Works perfectly on Render (no persistent filesystem needed).
+3. HEALTH SERVER started before Kafka connections (Render boot health checks).
 
-4. HEALTH SERVER STARTED BEFORE KAFKA CONNECTIONS
-   Render health-checks /health during container boot. Server now starts
-   before the Kafka consumer is initialized so boot health checks never fail.
+4. CLEAN SHUTDOWN — consumer.close() → dlq_producer.flush() in correct order.
 
-5. CLEAN SHUTDOWN
-   consumer.close() then dlq_producer.flush() in correct order.
-   Signal handlers renamed to avoid shadowing builtins.
+5. L2 NORMALIZATION on dense embeddings for correct cosine similarity.
 
-6. L2 NORMALIZATION ADDED TO DENSE EMBEDDINGS
-   Ensures cosine similarity works correctly in Qdrant.
+6. certifi added to requirements.txt so it's always available.
 """
 import os
 import signal
@@ -119,9 +114,10 @@ def _run_health_server():
     HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler).serve_forever()
 
 
-start_http_server(9100)
-threading.Thread(target=_run_health_server, daemon=True).start()
-logger.info(f"Health server on :{HEALTH_PORT} | Prometheus on :9100")
+if not _TESTING:
+    start_http_server(9100)
+    threading.Thread(target=_run_health_server, daemon=True).start()
+    logger.info(f"Health server on :{HEALTH_PORT} | Prometheus on :9100")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -218,11 +214,30 @@ if not _TESTING:
 # EMBEDDING
 # ─────────────────────────────────────────────────────────────
 def embed_dense_batch(texts: list) -> list:
-    inputs = _tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    """
+    Embed a list of strings, returning a list of L2-normalised float vectors.
+    Each vector has EMBEDDING_DIM (384) dimensions.
+    Always pass padding=True and truncation=True so batches of different
+    lengths work correctly and inputs > 512 tokens don't raise errors.
+    """
+    inputs = _tokenizer(
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
+    )
     with torch.inference_mode():
         out = _model(**inputs)
-    mask = inputs["attention_mask"].unsqueeze(-1).expand(out.last_hidden_state.size()).float()
-    emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
+    mask = (
+        inputs["attention_mask"]
+        .unsqueeze(-1)
+        .expand(out.last_hidden_state.size())
+        .float()
+    )
+    emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(
+        mask.sum(1), min=1e-9
+    )
     return F.normalize(emb, p=2, dim=1).tolist()
 
 
