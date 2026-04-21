@@ -98,88 +98,88 @@ WORKER_THROUGHPUT = Gauge("worker_throughput_docs_per_second", "Current embeddin
 QUEUE_LAG         = Gauge("worker_kafka_consumer_lag",         "Estimated Kafka consumer lag")
 
 # ── Initialization guard — skipped when TESTING=true (unit tests) ─────────────
+# ── Initialization guard — skipped when TESTING=true ─────────────
 _TESTING = os.getenv("TESTING") == "true"
+
 if not _TESTING:
-    # ── Client Initialization ─────────────────────────────────────────────────
+    # ── QDRANT CLIENT ─────────────────────────────────────────────
     logger.info("Initializing Qdrant client...")
 
     QDRANT_URL = os.getenv("QDRANT_URL")
     QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
     if QDRANT_URL:
-        # 🔵 Producción (Qdrant Cloud)
         qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
         logger.info(f"Connected to Qdrant Cloud: {QDRANT_URL}")
     else:
-        # 🟡 Desarrollo local
         QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
         QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-
         qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
         logger.info(f"Connected to local Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
 
-    # ── Collection Setup ──────────────────────────────────────────────────────
+    # ── COLLECTION SETUP ──────────────────────────────────────────
     existing = [c.name for c in qdrant.get_collections().collections]
 
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            vectors_config=VectorParams(
+                size=EMBEDDING_DIM,
+                distance=Distance.COSINE
+            ),
             sparse_vectors_config={"text-sparse": SparseVectorParams()},
         )
         logger.info(f"Collection '{COLLECTION_NAME}' created.")
     else:
         logger.info(f"Reusing collection '{COLLECTION_NAME}'.")
 
-    # ── Collection Setup ──────────────────────────────────────────────────────
-    existing = [c.name for c in qdrant.get_collections().collections]
-
-    if COLLECTION_NAME not in existing:
-        qdrant.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-            sparse_vectors_config={"text-sparse": SparseVectorParams()},
-        )
-        logger.info(f"Collection '{COLLECTION_NAME}' created.")
-    else:
-        logger.info(f"Reusing collection '{COLLECTION_NAME}'.")
-    # ── Model Loading ──────────────────────────────────────────────────────────
+    # ── MODEL LOADING ─────────────────────────────────────────────
     logger.info(f"Loading dense model: {EMBEDDING_MODEL}")
     _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
-    _model     = AutoModel.from_pretrained(EMBEDDING_MODEL)
+    _model = AutoModel.from_pretrained(EMBEDDING_MODEL)
     _model.eval()
-    logger.info("Dense model loaded.")
 
     ENABLE_SPARSE = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
+    _sparse_model = None
+
     if ENABLE_SPARSE:
         logger.info("Loading SPLADE model...")
-        _sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
+        _sparse_model = SparseTextEmbedding(
+            model_name="prithivida/Splade_PP_en_v1"
+        )
         logger.info("SPLADE loaded.")
     else:
-        _sparse_model = None
-        logger.info("SPLADE disabled (ENABLE_SPARSE=false)")
+        logger.info("SPLADE disabled")
 
-    logger.info("Initializing Semantic Chunker...")
+    # ── CHUNKER ───────────────────────────────────────────────────
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
 
-    # ── Model Warmup ───────────────────────────────────────────────────────────
+    # ── WARMUP ────────────────────────────────────────────────────
     logger.info("Executing model warmup...")
-    _warmup_text = "warmup pass to initialize embedding model kernels"
+    _warmup_text = "warmup pass"
+
     with torch.inference_mode():
-        _warmup_inputs = _tokenizer(_warmup_text, return_tensors="pt", padding=True, truncation=True)
+        _warmup_inputs = _tokenizer(
+            _warmup_text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        )
         _ = _model(**_warmup_inputs)
+
     if _sparse_model:
         list(_sparse_model.embed([_warmup_text]))
-    logger.info("Model warmup completed — worker ready to process documents.")
 
-    # ── Kafka Clients ──────────────────────────────────────────────────────────
+    logger.info("Model warmup completed.")
+
+    # ── KAFKA ─────────────────────────────────────────────────────
     KAFKA_SASL_USER = os.getenv('KAFKA_SASL_USERNAME', '')
     KAFKA_SASL_PASS = os.getenv('KAFKA_SASL_PASSWORD', '')
 
     consumer_conf = {
-        "bootstrap.servers":  KAFKA_BOOTSTRAP,
-        "group.id":           KAFKA_GROUP_ID,
-        "auto.offset.reset":  "earliest",
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "group.id": KAFKA_GROUP_ID,
+        "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
         "max.poll.interval.ms": 300000,
     }
@@ -187,38 +187,33 @@ if not _TESTING:
     if KAFKA_SASL_USER and KAFKA_SASL_PASS:
         consumer_conf.update({
             "security.protocol": "SASL_SSL",
-            "sasl.mechanism":    "SCRAM-SHA-256",
-            "ssl.ca.location":   "/usr/local/share/ca-certificates/aiven-ca.crt",
-            "sasl.username":     KAFKA_SASL_USER,
-            "sasl.password":     KAFKA_SASL_PASS,
+            "sasl.mechanism": "SCRAM-SHA-256",
+            "sasl.username": KAFKA_SASL_USER,
+            "sasl.password": KAFKA_SASL_PASS,
+            # ❌ FIX IMPORTANTE: NO CA FILE (rompe Aiven/Render)
+            "ssl.endpoint.identification.algorithm": "https",
         })
-        logger.info("Kafka Consumer SASL/SSL enabled (cloud mode — Aiven/Upstash)")
 
     consumer = Consumer(consumer_conf)
     consumer.subscribe([KAFKA_TOPIC_IN])
 
-    DLQ_CONF = {"bootstrap.servers": KAFKA_BOOTSTRAP}
-    if KAFKA_SASL_USER and KAFKA_SASL_PASS:
-        DLQ_CONF.update({
+    dlq_producer = Producer({
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        **({
             "security.protocol": "SASL_SSL",
-            "sasl.mechanism":    "SCRAM-SHA-256",
-            "sasl.username":     KAFKA_SASL_USER,
-            "sasl.password":     KAFKA_SASL_PASS,
-            "ssl.ca.location":   "/usr/local/share/ca-certificates/aiven-ca.crt",
-        })
-    dlq_producer = Producer(DLQ_CONF)
+            "sasl.mechanism": "SCRAM-SHA-256",
+            "sasl.username": KAFKA_SASL_USER,
+            "sasl.password": KAFKA_SASL_PASS,
+        } if KAFKA_SASL_USER and KAFKA_SASL_PASS else {})
+    })
 
-    # ── Health Check HTTP Server ───────────────────────────────────────────────
+    # ── HEALTH SERVER ─────────────────────────────────────────────
     class HealthHandler(BaseHTTPRequestHandler):
-        """Minimal HTTP server for Docker healthchecks."""
-
         def do_GET(self):
             if self.path == "/health":
-                body = b'{"status":"healthy","service":"worker"}'
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(b'{"status":"healthy"}')
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -228,20 +223,20 @@ if not _TESTING:
 
     def start_health_server():
         server = HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler)
-        logger.info(f"Health server listening on :{HEALTH_PORT}")
+        logger.info(f"Health server on :{HEALTH_PORT}")
         server.serve_forever()
 
     start_http_server(9100)
     threading.Thread(target=start_health_server, daemon=True).start()
+
 else:
-    # Stubs for unit tests — no real connections made
-    _tokenizer    = None
-    _model        = None
+    _tokenizer = None
+    _model = None
     _sparse_model = None
-    qdrant        = None
-    consumer      = None
-    dlq_producer  = None
-    chunker       = None
+    qdrant = None
+    consumer = None
+    dlq_producer = None
+    chunker = None
 
 
 # ============================================================
