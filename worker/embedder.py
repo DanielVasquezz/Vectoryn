@@ -157,7 +157,7 @@ if not _TESTING:
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
 
     # Warmup del modelo
-    
+
     with torch.inference_mode():
         inp = _tokenizer("warmup", return_tensors="pt")
         _ = _model(**inp)
