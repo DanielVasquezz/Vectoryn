@@ -41,9 +41,6 @@ CHANGES vs original v2.0:
    Now: Separate thread with a minimal HTTP server on :8002 that
    responds to /health — enables docker-compose healthchecks.
 """
-
-import json
-import logging
 import os
 import threading
 import signal
@@ -66,7 +63,6 @@ from qdrant_client.models import (
     SparseVectorParams,
     PointStruct,
 )
-
 # Para métricas Prometheus
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 

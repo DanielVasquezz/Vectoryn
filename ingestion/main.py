@@ -118,12 +118,10 @@ def _setup_tracing() -> trace.Tracer:
 
 tracer = _setup_tracing()
 FastAPIInstrumentor.instrument_app(app)
-
 # ─────────────────────────────────────────────────────────────
 # KAFKA PRODUCER (AIVEND CLOUD + SASL_SSL FIX)
 # ─────────────────────────────────────────────────────────────
 def _init_kafka_producer():
-    # Configuración base
     kafka_conf = {
         'bootstrap.servers': KAFKA_BOOTSTRAP,
         'client.id': 'vectoryn-ingestion-v2',
@@ -132,7 +130,7 @@ def _init_kafka_producer():
         'delivery.timeout.ms': 10000,
     }
 
-    # 🔥 FIX 1: Verificación certificados mTLS (Aiven Cloud)
+    # 🔥 FIX 1: mTLS (Aiven Cloud)
     ca_data = os.getenv("KAFKA_CA_CERT")
     cert_data = os.getenv("KAFKA_ACCESS_CERT")
     key_data = os.getenv("KAFKA_ACCESS_KEY")
@@ -141,14 +139,19 @@ def _init_kafka_producer():
         try:
             cert_dir = "/tmp/kafka_certs"
             os.makedirs(cert_dir, exist_ok=True)
-            
+
             ca_path = os.path.join(cert_dir, "ca.pem")
             cert_path = os.path.join(cert_dir, "service.cert")
             key_path = os.path.join(cert_dir, "service.key")
 
-            with open(ca_path, "w") as f: f.write(ca_data)
-            with open(cert_path, "w") as f: f.write(cert_data)
-            with open(key_path, "w") as f: f.write(key_data)
+            with open(ca_path, "w") as f:
+                f.write(ca_data)
+
+            with open(cert_path, "w") as f:
+                f.write(cert_data)
+
+            with open(key_path, "w") as f:
+                f.write(key_data)
 
             kafka_conf.update({
                 'security.protocol': 'SSL',
@@ -157,15 +160,17 @@ def _init_kafka_producer():
                 'ssl.key.location': key_path,
                 'ssl.endpoint.identification.algorithm': 'https',
             })
-            logger.info('Kafka mTLS SSL enabled (Aiven Cloud mode)')
+
+            logger.info("Kafka mTLS SSL enabled (Aiven Cloud mode)")
+
         except Exception as e:
             logger.error(f"mTLS cert setup failed: {e}")
 
-    # 🔥 FIX 2: SASL_SSL fallback (Upstash/others)
+    # 🔥 FIX 2: SASL_SSL fallback (Upstash / others)
     else:
         KAFKA_SASL_USER = os.getenv('KAFKA_SASL_USERNAME', '')
         KAFKA_SASL_PASS = os.getenv('KAFKA_SASL_PASSWORD', '')
-        
+
         if KAFKA_SASL_USER and KAFKA_SASL_PASS:
             kafka_conf.update({
                 'security.protocol': 'SASL_SSL',
@@ -175,15 +180,15 @@ def _init_kafka_producer():
                 'ssl.ca.location': certifi.where(),
                 'ssl.endpoint.identification.algorithm': 'https',
             })
-            logger.info('Kafka SASL/SSL enabled (Upstash/Generic Cloud)')
+
+            logger.info("Kafka SASL/SSL enabled (Upstash/Generic Cloud)")
 
     producer = Producer(kafka_conf)
     logger.info("Kafka producer initialized successfully")
     return producer
-
+    
 producer = _init_kafka_producer()
 service_start_time = time.time()
-
 # ─────────────────────────────────────────────────────────────
 # PII SHIELD
 # ─────────────────────────────────────────────────────────────
