@@ -45,86 +45,66 @@ CHANGES vs original v2.0:
 import json
 import logging
 import os
+import threading
 import signal
 import time
-import threading
 import uuid
+import json
+import logging
+
+import torch
+import certifi
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import certifi
-import torch
-# Eliminado KafkaError porque no se estaba usando (Error F401)
-from confluent_kafka import Consumer, Producer
-from dotenv import load_dotenv
-from fastembed import SparseTextEmbedding
+# Importar clases necesarias de qdrant-client
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    SparseVector,
+    SparseVectorParams,
+    PointStruct,
+)
 
-# ... resto del código ...
+# Para métricas Prometheus
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import re
+# Variables de entorno y configuración
 from dotenv import load_dotenv
 
 load_dotenv()
-from pydantic import BaseModel, field_validator
-from confluent_kafka import Producer
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from prometheus_fastapi_instrumentator import Instrumentator
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.sdk.resources import Resource
-import json
-import uuid
-import os
-import time
-import logging
-import certifi
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='{"time": "%(asctime)s", "level": "%(levelname)s", "service": "ingestion", "message": "%(message)s"}'
-)
-logger = logging.getLogger("ingestion")
+# Configuración general
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC_IN = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
+KAFKA_TOPIC_FAILED = os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
+KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v3")
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP   = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-KAFKA_TOPIC_IN    = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
-KAFKA_TOPIC_FAILED= os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
-KAFKA_GROUP_ID    = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v3")
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "documents")
 
-QDRANT_URL       = os.getenv("QDRANT_URL")
-QDRANT_API_KEY   = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME  = os.getenv("QDRANT_COLLECTION", "documents")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIM = 384
 
-EMBEDDING_MODEL  = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDING_DIM    = 384
-
-BATCH_SIZE       = int(os.getenv("WORKER_BATCH_SIZE", "5"))
+BATCH_SIZE = int(os.getenv("WORKER_BATCH_SIZE", "5"))
 BATCH_TIMEOUT_MS = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
-HEALTH_PORT      = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
+HEALTH_PORT = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
 
 _TESTING = os.getenv("TESTING") == "true"
 
-logger.info(
-    f"Worker Config → Kafka={KAFKA_BOOTSTRAP} "
-    f"Qdrant={QDRANT_URL or 'local'} BatchSize={BATCH_SIZE}"
+logger = logging.getLogger("worker")
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"time": "%(asctime)s", "levelname": "%(levelname)s", "service": "worker", "message": "%(message)s"}'
 )
 
 # ─────────────────────────────────────────────────────────────
-# METRICS
+# METRICS PROMETHEUS
 # ─────────────────────────────────────────────────────────────
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
-
 DOCS_PROCESSED = Counter("worker_documents_processed_total", "Docs processed")
-DOCS_FAILED    = Counter("worker_documents_failed_total", "Docs failed")
+DOCS_FAILED = Counter("worker_documents_failed_total", "Docs failed")
 CHUNKS_CREATED = Counter("worker_chunks_created_total", "Chunks created")
 
 EMBED_LATENCY = Histogram(
@@ -135,24 +115,23 @@ EMBED_LATENCY = Histogram(
 
 WORKER_THROUGHPUT = Gauge("worker_throughput_docs_per_second", "Throughput")
 
+
 # ─────────────────────────────────────────────────────────────
-# INIT (skip tests)
+# INICIALIZACIÓN (skip tests)
 # ─────────────────────────────────────────────────────────────
 if not _TESTING:
     logger.info("Initializing Qdrant...")
 
     if QDRANT_URL:
-        from qdrant_client import QdrantClient
         qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
     else:
-        from qdrant_client import QdrantClient
         qdrant = QdrantClient(
             host=os.getenv("QDRANT_HOST", "localhost"),
             port=int(os.getenv("QDRANT_PORT", "6333"))
         )
 
+    # Crear colección si no existe
     existing = [c.name for c in qdrant.get_collections().collections]
-
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
@@ -163,30 +142,31 @@ if not _TESTING:
             sparse_vectors_config={"text-sparse": SparseVectorParams()},
         )
 
-    logger.info("Loading models...")
-
+    # Cargar modelo transformer
     from transformers import AutoTokenizer, AutoModel
     _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
     _model = AutoModel.from_pretrained(EMBEDDING_MODEL)
     _model.eval()
 
+    # Modelo sparse si habilitado
     ENABLE_SPARSE = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
-    from fastembed import SparseTextEmbedding
-    _sparse_model = (
-        SparseTextEmbedding("prithivida/Splade_PP_en_v1")
-        if ENABLE_SPARSE else None
-    )
+    if ENABLE_SPARSE:
+        from fastembed import SparseTextEmbedding
+        _sparse_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
+    else:
+        _sparse_model = None
 
+    # Chunker (de tu código)
     from ingestion.chunker import SemanticChunker
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
 
-    logger.info("Warmup...")
+    # Warmup del modelo
     import torch
     with torch.inference_mode():
         inp = _tokenizer("warmup", return_tensors="pt")
         _ = _model(**inp)
 
-    # ── KAFKA (SASL_SSL FIXED) ────────────────────────────────
+    # Config Kafka SASL_SSL
     KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
     KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
 
@@ -195,12 +175,10 @@ if not _TESTING:
         "group.id": KAFKA_GROUP_ID,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": False,
-
         "security.protocol": "SASL_SSL",
         "sasl.mechanism": "SCRAM-SHA-256",
         "sasl.username": KAFKA_USER,
         "sasl.password": KAFKA_PASS,
-
         "ssl.ca.location": certifi.where(),
         "ssl.endpoint.identification.algorithm": "https",
     }
@@ -219,9 +197,7 @@ if not _TESTING:
         "ssl.endpoint.identification.algorithm": "https",
     })
 
-    # ── HEALTH ────────────────────────────────────────────────
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
+    # Servidor HTTP health
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/health":
@@ -238,29 +214,26 @@ if not _TESTING:
         HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler).serve_forever()
 
     import threading
-    import time
     start_http_server(9100)
     threading.Thread(target=start_health, daemon=True).start()
-
 else:
     _tokenizer = _model = _sparse_model = None
     qdrant = consumer = dlq_producer = chunker = None
 
 # ─────────────────────────────────────────────────────────────
-# EMBEDDING
+# FUNCIONES DE EMBEDDING
 # ─────────────────────────────────────────────────────────────
 def embed_dense_batch(texts):
     inputs = _tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
     import torch
     with torch.inference_mode():
         out = _model(**inputs)
-
     mask = inputs["attention_mask"].unsqueeze(-1).expand(out.last_hidden_state.size()).float()
     emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
     return emb.tolist()
 
 # ─────────────────────────────────────────────────────────────
-# DLQ
+# DLQ (Dead Letter Queue)
 # ─────────────────────────────────────────────────────────────
 def send_to_dlq(payload, error):
     try:
@@ -276,13 +249,13 @@ def send_to_dlq(payload, error):
         logger.error(f"DLQ_FAILED {e}")
 
 # ─────────────────────────────────────────────────────────────
-# PROCESS BATCH
+# PROCESAR BATCH
 # ─────────────────────────────────────────────────────────────
 def process_batch(messages):
     if not messages:
         return
 
-    start = time.time()
+    start_time = time.time()
 
     payloads = []
     for m in messages:
@@ -298,7 +271,6 @@ def process_batch(messages):
         try:
             chunks = chunker.chunk_text(p.get("content", ""))
             CHUNKS_CREATED.inc(len(chunks))
-
             for c in chunks:
                 all_chunks.append(c["content"])
                 meta.append((p.get("doc_id"), c["chunk_index"], c["total_chunks"]))
@@ -340,19 +312,16 @@ def process_batch(messages):
 
     try:
         qdrant.upsert(COLLECTION_NAME, points=points)
-
         DOCS_PROCESSED.inc(len(payloads))
-        WORKER_THROUGHPUT.set(len(payloads) / max(time.time() - start, 1))
-
+        WORKER_THROUGHPUT.set(len(payloads) / max(time.time() - start_time, 1))
         consumer.commit()
         logger.info(f"BATCH_DONE docs={len(payloads)}")
-
     except Exception as e:
         for p in payloads:
             send_to_dlq(p, e)
 
 # ─────────────────────────────────────────────────────────────
-# LOOP
+# LOOP PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 _running = True
 
@@ -360,24 +329,21 @@ def stop(*_):
     global _running
     _running = False
 
-import signal
-import threading
-
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
 
 if not _TESTING:
     buffer = []
-    last = time.time()
+    last_time = time.time()
 
     while _running:
         msg = consumer.poll(0.1)
 
         if msg is None:
-            if buffer and (time.time() - last) * 1000 > BATCH_TIMEOUT_MS:
+            if buffer and (time.time() - last_time) * 1000 > BATCH_TIMEOUT_MS:
                 process_batch(buffer)
                 buffer = []
-                last = time.time()
+                last_time = time.time()
             continue
 
         if msg.error():
@@ -388,8 +354,9 @@ if not _TESTING:
         if len(buffer) >= BATCH_SIZE:
             process_batch(buffer)
             buffer = []
-            last = time.time()
+            last_time = time.time()
 
+    # Procesar resto
     if buffer:
         process_batch(buffer)
 
