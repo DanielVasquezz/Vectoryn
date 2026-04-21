@@ -1,0 +1,36 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+venv/
+
+# =========================
+# Environment variables
+# =========================
+# Do NOT remove this; sensitive credentials must stay out of Git
+.env
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Docker / Services data
+# =========================
+# Ignore local persistent data for databases/brokers
+*.pid
+qdrant_data/
+redpanda_data/
+
+# =========================
+# Node (frontend if applicable)
+# =========================
+node_modules/

@@ -1,0 +1,154 @@
+# render.yaml — Vectoryn deployment on Render (Free Tier)
+# Documentation: https://render.com/docs/blueprint-spec
+
+services:
+
+  # ── INGESTION API ─────────────────────────────────────────
+  - type: web
+    name: vectoryn-ingestion
+    runtime: docker
+    dockerfilePath: ./ingestion/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Kafka → Aiven Cloud (SASL/SSL)
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: KAFKA_SASL_USERNAME
+        sync: false
+      - key: KAFKA_SASL_PASSWORD
+        sync: false
+      - key: KAFKA_TOPIC_INGEST
+        value: raw-documents
+      - key: KAFKA_TOPIC_FAILED
+        value: documents-failed
+      # Qdrant Cloud
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: documents
+      # Redis → Upstash
+      - key: REDIS_URL
+        sync: false
+      # App
+      - key: VECTORYN_API_KEY
+        sync: false
+      - key: ENABLE_PII_SHIELD
+        value: "true"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: ""
+
+  # ── SEARCH API ────────────────────────────────────────────
+  - type: web
+    name: vectoryn-search
+    runtime: docker
+    dockerfilePath: ./search/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Qdrant Cloud
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: documents
+      # Redis → Upstash
+      - key: REDIS_URL
+        sync: false
+      # LLM
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      # App
+      - key: VECTORYN_API_KEY
+        sync: false
+      - key: ENABLE_RAGAS_EVAL
+        value: "false"
+      - key: ENABLE_QUERY_EXPANSION
+        value: "true"
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+      - key: OMP_NUM_THREADS
+        value: "2"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: ""
+
+  # ── GATEWAY ───────────────────────────────────────────────
+  - type: web
+    name: vectoryn-gateway
+    runtime: docker
+    dockerfilePath: ./gateway/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: INGESTION_SERVICE_URL
+        fromService:
+          name: vectoryn-ingestion
+          type: web
+          property: host
+      - key: SEARCH_SERVICE_URL
+        fromService:
+          name: vectoryn-search
+          type: web
+          property: host
+      - key: VECTORYN_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: ""
+
+  # ── WORKER (web service — Render free tier no permite background workers) ──
+  - type: web
+    name: vectoryn-worker
+    runtime: docker
+    dockerfilePath: ./worker/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Kafka → Aiven Cloud (SASL/SSL)
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: KAFKA_SASL_USERNAME
+        sync: false
+      - key: KAFKA_SASL_PASSWORD
+        sync: false
+      - key: KAFKA_TOPIC_INGEST
+        value: raw-documents
+      - key: KAFKA_TOPIC_FAILED
+        value: documents-failed
+      - key: KAFKA_GROUP_ID
+        value: embedding-cluster-v3
+      # Qdrant Cloud
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: documents
+      # Redis → Upstash
+      - key: REDIS_URL
+        sync: false
+      # Worker config
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+      - key: WORKER_BATCH_SIZE
+        value: "3"
+      - key: WORKER_BATCH_TIMEOUT_MS
+        value: "500"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: ""

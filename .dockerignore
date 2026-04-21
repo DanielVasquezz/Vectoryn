@@ -1,0 +1,13 @@
+# Speed up Docker build context transfer
+.git
+.gitignore
+*.md
+.env.example
+tests/
+.pytest_cache/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.github/
+body.json
+nginx.conf

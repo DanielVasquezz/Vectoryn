@@ -1,0 +1,28 @@
+apiVersion: 1
+
+# ============================================================
+# LECCIÓN: Grafana Provisioning
+# ============================================================
+# Instead of manually configuring the Prometheus datasource
+# in the Grafana UI every time you start the system,
+# "provisioning" does it automatically on startup.
+#
+# This is Infrastructure as Code (IaC) applied to Grafana:
+# the configuration lives in the Git repository,
+# not in an administrator's head.
+#
+# In companies like Airbnb and Spotify, all Grafana dashboards
+# and datasources are stored in Git. Any change
+# goes through code review before affecting production.
+# ============================================================
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false  # Prevents accidental changes from the UI
+    jsonData:
+      timeInterval: "15s"  # Must match scrape_interval
+      httpMethod: POST     # More efficient for long queries

@@ -1,0 +1,413 @@
+# ============================================================
+# VECTORYN ENTERPRISE — docker-compose PRODUCTION READY
+# ============================================================
+# FIXES APLICADOS (versión anterior) +
+# NUEVO FIX CRÍTICO:
+#
+# 10. worker/ingestion/search: QDRANT_HOST hardcodeado a "qdrant"
+#     (docker interno). FIX: usa variables de entorno desde .env
+#     para apuntar a Qdrant Cloud con HTTPS.
+#
+# 11. QdrantClient necesita QDRANT_URL completo (https://...) y
+#     QDRANT_API_KEY para autenticarse en Cloud.
+#     FIX: se pasan QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION
+#     como variables desde .env, NO valores hardcodeados.
+#
+# 12. El servicio qdrant (docker local) se mantiene como fallback
+#     opcional pero los workers apuntan al Cloud por defecto.
+# ============================================================
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+# Variables comunes de Qdrant Cloud para reusar en todos los servicios
+x-qdrant-cloud: &qdrant-cloud-env
+  QDRANT_URL: ${QDRANT_URL}
+  QDRANT_API_KEY: ${QDRANT_API_KEY}
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION:-vectoryn_docs}
+
+services:
+
+  # ════════════════════════════════════════════════════════════
+  # DATA INFRASTRUCTURE
+  # ════════════════════════════════════════════════════════════
+
+  redpanda:
+    image: redpandadata/redpanda:v23.3.11
+    container_name: kafka_redpanda
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr 0.0.0.0:8082
+    ports:
+      - "9092:9092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.75'
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  # ────────────────────────────────────────────────────────────
+  # Qdrant LOCAL — solo como fallback/dev, NO usado por workers
+  # en producción (workers apuntan a QDRANT_URL del Cloud)
+  # ────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: qdrant_vector_db
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__ON_DISK_PAYLOAD=true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: vectoryn_redis
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly no
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  # ════════════════════════════════════════════════════════════
+  # OBSERVABILITY (Separate Profile)
+  # ════════════════════════════════════════════════════════════
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.50.1
+    container_name: vectoryn_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+      - '--storage.tsdb.retention.size=512MB'
+      - '--web.enable-lifecycle'
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:10.3.3
+    container_name: vectoryn_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-vectoryn}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ENABLE_GZIP=true
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.55
+    container_name: vectoryn_jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - JAEGER_STORAGE_TYPE=memory
+      - MEMORY_MAX_TRACES=5000
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:16686/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  # ════════════════════════════════════════════════════════════
+  # APPLICATION SERVICES
+  # ════════════════════════════════════════════════════════════
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    container_name: vectoryn_ingestion
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      # FIX #10: Qdrant Cloud vía variables de .env (NO hardcodeado)
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-vectoryn_docs}
+      - REDIS_URL=redis://redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=ingestion,service.version=2.0.0
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: vectoryn_worker
+    env_file: .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      # ─────────────────────────────────────────────────────────
+      # FIX #10 CRÍTICO: Worker apunta a Qdrant CLOUD, no local.
+      # QDRANT_URL debe ser https://xxxx.aws.cloud.qdrant.io
+      # en tu .env. NO uses QDRANT_HOST=qdrant (era el bug).
+      # ─────────────────────────────────────────────────────────
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-vectoryn_docs}
+      - REDIS_URL=redis://redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=worker,service.version=2.0.0
+      - OMP_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      # FIX: worker ya NO depende del qdrant local — usa Cloud
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '1.5'
+        reservations:
+          memory: 1024M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s   # ML models take ~60-90s to load
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  search:
+    build:
+      context: .
+      dockerfile: search/Dockerfile
+    container_name: vectoryn_search
+    ports:
+      - "8001:8001"
+    env_file: .env
+    environment:
+      # FIX #10: Qdrant Cloud vía variables de .env
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-vectoryn_docs}
+      - REDIS_URL=redis://redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=search,service.version=2.0.0
+      - OMP_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '1.0'
+        reservations:
+          memory: 1024M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: vectoryn_gateway
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      - INGESTION_SERVICE_URL=http://ingestion:8000
+      - SEARCH_SERVICE_URL=http://search:8001
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,http://127.0.0.1:5500,http://localhost:5500
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=gateway,service.version=2.0.0
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+
+  frontend:
+    image: nginx:1.25-alpine
+    container_name: vectoryn_frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - gateway
+    <<: *default-restart
+    networks:
+      - vectoryn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  vectoryn-net:
+    name: vectoryn-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redpanda-data:
+  qdrant-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

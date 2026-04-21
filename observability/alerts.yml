@@ -1,0 +1,101 @@
+# ============================================================
+# Prometheus Alerting Rules — Vectoryn
+# ============================================================
+#
+# LESSON: Why alerts and not just dashboards?
+# A dashboard requires someone to be watching it.
+# Alerts notify you automatically when something goes wrong.
+#
+# At Google, Meta, and Amazon, they have 24/7 "on-call" engineers.
+# When these alerts fired, they sent notifications
+# to PagerDuty, waking up the responsible engineer.
+#
+# Having well-defined alerts in your project demonstrates that
+# you understand the difference between a prototype and a real system.
+# ============================================================
+
+groups:
+  - name: vectoryn_slo_alerts
+    rules:
+
+      # ──────────────────────────────────────────────────────
+      # ALERT: High HTTP error rate
+      # ──────────────────────────────────────────────────────
+      # If more than 5% of requests fail (status 5xx)
+      # for more than 2 minutes → something is very wrong.
+      #
+      # rate(metric[5m]) = average changes per second
+      # in the last 5 minutes. It's more stable than the
+      # instantaneous value (which can have transient spikes).
+      # ──────────────────────────────────────────────────────
+      - alert: HighErrorRate
+        expr: |
+          rate(http_requests_total{status=~"5.."}[5m])
+          /
+          rate(http_requests_total[5m])
+          > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate > 5% en {{ $labels.job }}"
+          description: "El servicio {{ $labels.job }} tiene {{ $value | humanizePercentage }} de errores en los últimos 5 min."
+
+      # ──────────────────────────────────────────────────────
+      # ALERT: Very high P99 latency
+      # ──────────────────────────────────────────────────────
+      # P99 > 2 seconds means 1 in 100 users
+      # waits more than 2 seconds. Unacceptable for real UX.
+      #
+      # histogram_quantile(0.99, ...) calculates the 99th percentile
+      # of the latency distribution. More informative than
+      # the average, which can hide extreme outliers.
+      # ──────────────────────────────────────────────────────
+      - alert: HighP99Latency
+        expr: |
+          histogram_quantile(
+            0.99,
+            rate(http_request_duration_seconds_bucket[5m])
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latencia P99 > 2s en {{ $labels.job }}"
+          description: "El 1% de usuarios está experimentando latencias de {{ $value }}s."
+
+      # ──────────────────────────────────────────────────────
+      # ALERT: Service down
+      # ──────────────────────────────────────────────────────
+      # If Prometheus can't scrape a service's /metrics
+      # for more than 1 minute, the service is probably down.
+      # up == 0 means "Prometheus couldn't reach the target".
+      # ──────────────────────────────────────────────────────
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service down: {{ $labels.job }}"
+          description: "{{ $labels.instance }} has not responded for over 1 minute."
+
+      # ──────────────────────────────────────────────────────
+      # ALERT: Too many requests rejected by rate limit
+      # ──────────────────────────────────────────────────────
+      # If 10% of requests receive 429 (Too Many Requests),
+      # it may indicate that the limits are too strict
+      # or that an attack/abuse is in progress.
+      # ──────────────────────────────────────────────────────
+      - alert: HighRateLimitRejections
+        expr: |
+          rate(http_requests_total{status="429"}[5m])
+          /
+          rate(http_requests_total[5m])
+          > 0.10
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Alta tasa de rechazos por rate limit en {{ $labels.job }}"
+          description: "{{ $value | humanizePercentage }} de requests están siendo rechazados (429)."

@@ -1,0 +1,32 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy notice
+        run: |
+          echo "Deploying to ${{ github.event.inputs.environment }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo ""
+          echo "To enable automatic deployment, configure these secrets:"
+          echo "  DEPLOY_HOST      — your server IP or hostname"
+          echo "  DEPLOY_USER      — SSH username"
+          echo "  DEPLOY_SSH_KEY   — private SSH key"

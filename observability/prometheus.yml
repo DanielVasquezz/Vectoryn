@@ -1,0 +1,82 @@
+# ============================================================
+# Prometheus Configuration — Vectoryn Observability Stack
+# ============================================================
+#
+# LESSON: What does Prometheus do?
+# Prometheus is a "time series database" specialized in metrics.
+# Every 15 seconds (global.scrape_interval) it visits the /metrics
+# endpoint of each service and saves the numbers with timestamps.
+#
+# Then you can run queries like:
+#   rate(http_requests_total[5m])  → requests per second in the last 5 min
+#   histogram_quantile(0.99, ...)  → P99 latency
+#   sum by (status)(http_requests_total) → requests grouped by status code
+#
+# This is what Grafana uses to build dashboards.
+# ============================================================
+
+global:
+  scrape_interval: 15s      # Every 15s goes to /metrics of each service
+  evaluation_interval: 15s  # Evaluates alerts every 15s
+  scrape_timeout: 10s       # Timeout per scrape
+
+# ============================================================
+# LESSON: Alerting Rules
+# ============================================================
+# Alert rules define when something is "wrong".
+# Prometheus evaluates these rules every evaluation_interval.
+# If they are met, it sends alerts to Alertmanager (which sends
+# them to Slack, PagerDuty, email, etc.)
+#
+# In production, an alert for "P99 latency > 500ms" for
+# more than 2 minutes would trigger a notification to PagerDuty
+# that wakes up the on-call engineer at 3am.
+# That's what having a 99.9% SLA means.
+# ============================================================
+rule_files:
+  - "alerts.yml"
+
+# ============================================================
+# LESSON: Scrape Configs — "who to listen to"
+# ============================================================
+# Each job_name defines a group of services to monitor.
+# Prometheus's "pull" model is more reliable than "push":
+# if the service dies, Prometheus throws a "down" alert.
+# With push, there would be no way to distinguish "no traffic"
+# from "dead".
+# ============================================================
+scrape_configs:
+
+  # Prometheus monitors itself
+  # Metrics from the metrics database itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Ingestion Service — FastAPI
+  # /metrics expuesto por prometheus_fastapi_instrumentator
+  - job_name: 'vectoryn-ingestion'
+    static_configs:
+      - targets: ['ingestion:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s  # More frequent for the most active endpoint
+
+  # Search/RAG Service — FastAPI
+  - job_name: 'vectoryn-search'
+    static_configs:
+      - targets: ['search:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Qdrant Vector Database
+  # Qdrant exposes native metrics at /metrics
+  # Includes: collections, indexed vectors, I/O, memory
+  - job_name: 'qdrant'
+    static_configs:
+      - targets: ['qdrant:6333']
+    metrics_path: '/metrics'
+
+  # Redis — using redis_exporter
+  # Redis doesn't expose metrics in native Prometheus format,
+  # it needs an "exporter" to translate its stats to Prometheus format
+  # For simplicity, we monitor Qdrant and the APIs directly

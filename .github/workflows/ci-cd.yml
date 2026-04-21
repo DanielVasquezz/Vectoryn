@@ -1,0 +1,243 @@
+name: Vectoryn CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deploy target"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
+
+jobs:
+
+  # ── JOB 1: Tests & Code Quality ──────────────────────────────────────────
+  test:
+    name: Tests & Code Quality
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-asyncio pytest-cov httpx mock ruff
+          pip install -r ingestion/requirements.txt
+          pip install -r worker/requirements.txt
+          pip install -r search/requirements.txt
+
+      - name: Lint with Ruff
+        run: ruff check ingestion/ worker/ search/
+
+      - name: Run unit tests
+        env:
+          GROQ_API_KEY: "mock_key_for_ci"
+          VECTORYN_API_KEY: test-key-ci
+          REDIS_URL: redis://localhost:6379
+          QDRANT_HOST: localhost
+          QDRANT_PORT: "6333"
+          OTEL_EXPORTER_OTLP_ENDPOINT: ""
+          PYTHONPATH: .
+          TESTING: "true"
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+        run: |
+          pytest tests/unit/ \
+            --cov=ingestion \
+            --cov=worker \
+            --cov=search \
+            --cov-report=xml \
+            -v --tb=short
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ── JOB 2: Build & Push Docker Images ────────────────────────────────────
+  build:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_BASE }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & Push — Ingestion
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ingestion/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_BASE }}/ingestion:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=ingestion
+          cache-to: type=gha,scope=ingestion,mode=max
+
+      - name: Build & Push — Worker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: worker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_BASE }}/worker:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+
+      - name: Build & Push — Search
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: search/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_BASE }}/search:${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=search
+          cache-to: type=gha,scope=search,mode=max
+
+  # ── JOB 3: RAGAS Quality Gate ────────────────────────────────────────────
+  ragas-quality-gate:
+    name: RAGAS Quality Gate
+    runs-on: ubuntu-latest
+    needs: build
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install evaluation dependencies
+        run: pip install groq httpx pytest pytest-asyncio
+
+      - name: Run RAGAS quality evaluation
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "  GROQ_API_KEY secret not set — skipping RAGAS gate"
+            echo "To enable: go to Settings > Secrets > Actions > New secret"
+            exit 0
+          fi
+          python - << 'PYEOF'
+          import asyncio, sys
+          sys.path.insert(0, ".")
+          TEST_CASES = [
+            {
+              "question": "How does the semantic cache work?",
+              "answer": "The semantic cache stores responses indexed by embedding vectors and returns cached answers for similar queries using cosine similarity above 0.97.",
+              "contexts": ["The semantic cache stores responses indexed by embedding vectors and compares new queries using cosine distance with a 0.97 threshold."],
+            },
+          ]
+          MIN_FAITHFULNESS = 0.60
+          async def run_gate():
+            from search.evaluator import RAGASEvaluator
+            evaluator = RAGASEvaluator()
+            results = []
+            for case in TEST_CASES:
+              scores = await evaluator.evaluate(
+                question=case["question"], answer=case["answer"], contexts=case["contexts"]
+              )
+              results.append(scores)
+              print(f"  faithfulness={scores.faithfulness:.3f} overall={scores.overall_score:.3f}")
+            avg = sum(r.faithfulness for r in results) / len(results)
+            if avg < MIN_FAITHFULNESS:
+              print(f" GATE FAILED: {avg:.3f} < {MIN_FAITHFULNESS}")
+              sys.exit(1)
+            print(f" GATE PASSED: {avg:.3f}")
+          asyncio.run(run_gate())
+          PYEOF
+
+  # ── JOB 4: Deploy ────────────────────────────────────────────────────────
+  # This job runs but prints a notice if SSH secrets are not configured.
+  # To enable real deployment: add DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+  # in Settings > Secrets and variables > Actions.
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, ragas-quality-gate]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy notice
+        run: |
+          echo "================================================"
+          echo "  Vectoryn — Deploy Step"
+          echo "================================================"
+          echo "  Commit : ${{ github.sha }}"
+          echo "  Author : ${{ github.actor }}"
+          echo ""
+          echo "  SSH deploy is not configured."
+          echo "  To enable auto-deploy to your own server:"
+          echo "  1. Go to Settings > Secrets > Actions"
+          echo "  2. Add: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY"
+          echo ""
+          echo "  For free hosting, see DEPLOY.md"
+          echo "================================================"
