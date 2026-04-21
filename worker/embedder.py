@@ -380,4 +380,3 @@ if not _TESTING:
     consumer.close()
     dlq_producer.flush(10)
     logger.info("Worker shut down cleanly.")
-    
