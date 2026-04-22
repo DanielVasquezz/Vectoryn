@@ -180,13 +180,12 @@ try:
     logger.info("sentence-transformers loaded — using normalized embeddings. (~90MB)")
 except ImportError:
     logger.warning("sentence-transformers not installed — loading AutoModel fallback...")
-    import torch
-    import torch.nn.functional as F
-    from transformers import AutoTokenizer, AutoModel
+    from transformers import AutoTokenizer, AutoModel  # noqa: E402
     _tokenizer  = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
     _auto_model = AutoModel.from_pretrained(EMBEDDING_MODEL)
     _auto_model.eval()
     logger.info("AutoModel loaded as fallback.")
+    # torch imported lazily inside get_dense_embedding() when this branch is active
 
 # Force GC after model load to reclaim any transient allocations
 gc.collect()
@@ -230,20 +229,17 @@ _ragas_history: deque = deque(maxlen=MAX_RAGAS_HISTORY)
 
 # ── Embedding Helpers ──────────────────────────────────────────────────────────
 def _l2_normalize(vec: list[float]) -> list[float]:
-    import torch
-    import torch.nn.functional as F
+    import torch  # noqa: PLC0415
     t = torch.tensor(vec, dtype=torch.float32)
-    return F.normalize(t, p=2, dim=0).tolist()
+    return torch.nn.functional.normalize(t, p=2, dim=0).tolist()
 
 
 def get_dense_embedding(text: str) -> list[float]:
     if _use_st and _st_model is not None:
-        result = _st_model.encode(text, normalize_embeddings=True).tolist()
-        return result
+        return _st_model.encode(text, normalize_embeddings=True).tolist()
 
-    # Fallback AutoModel (torch already imported above in this branch)
-    import torch
-    import torch.nn.functional as F
+    # Fallback: AutoModel (only active when sentence-transformers is not installed)
+    import torch  # noqa: PLC0415
     inputs = _tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
     with torch.inference_mode():
         outputs = _auto_model(**inputs)
