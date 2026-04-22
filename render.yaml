@@ -1,5 +1,19 @@
-# render.yaml — Vectoryn deployment on Render (Free Tier)
-# Documentation: https://render.com/docs/blueprint-spec
+# render.yaml — Vectoryn deployment on Render
+# Docs: https://render.com/docs/blueprint-spec
+#
+# VARIABLES REQUERIDAS (sync: false = debes setearlas manualmente en el dashboard):
+# ┌─────────────────────────┬──────────────────────────────────────────────────┐
+# │ Variable                │ Dónde conseguirla                                │
+# ├─────────────────────────┼──────────────────────────────────────────────────┤
+# │ KAFKA_BOOTSTRAP_SERVERS │ Aiven Console → Kafka → Overview → Host:Port     │
+# │ KAFKA_CA_CERT           │ Aiven Console → Kafka → Overview → Download CA   │
+# │ KAFKA_ACCESS_CERT       │ Aiven Console → Kafka → Overview → Access Cert   │
+# │ KAFKA_ACCESS_KEY        │ Aiven Console → Kafka → Overview → Access Key    │
+# │ QDRANT_URL              │ Qdrant Cloud → Cluster → URL                     │
+# │ QDRANT_API_KEY          │ Qdrant Cloud → Cluster → API Key                 │
+# │ GROQ_API_KEY            │ console.groq.com → API Keys                      │
+# │ VECTORYN_API_KEY        │ Cualquier string seguro (tú lo inventas)         │
+# └─────────────────────────┴──────────────────────────────────────────────────┘
 
 services:
 
@@ -12,32 +26,32 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      # Kafka → Aiven Cloud (SASL/SSL)
+      # ── Kafka → Aiven Cloud (mTLS) ──────────────────────
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
+      - key: KAFKA_CA_CERT
+        sync: false
+      - key: KAFKA_ACCESS_CERT
+        sync: false
+      - key: KAFKA_ACCESS_KEY
+        sync: false
+      # Fallback SASL (solo si NO usas mTLS)
       - key: KAFKA_SASL_USERNAME
         sync: false
       - key: KAFKA_SASL_PASSWORD
-        sync: false
-      # KAFKA_CA_CERT: paste the full content of your Aiven CA certificate here
-      # (the entire contents of aiven-ca.pem as a single env var, newlines included)
-      - key: KAFKA_CA_CERT
         sync: false
       - key: KAFKA_TOPIC_INGEST
         value: raw-documents
       - key: KAFKA_TOPIC_FAILED
         value: documents-failed
-      # Qdrant Cloud
+      # ── Qdrant Cloud ─────────────────────────────────────
       - key: QDRANT_URL
         sync: false
       - key: QDRANT_API_KEY
         sync: false
       - key: QDRANT_COLLECTION
         value: documents
-      # Redis → Upstash
-      - key: REDIS_URL
-        sync: false
-      # App
+      # ── App ──────────────────────────────────────────────
       - key: VECTORYN_API_KEY
         sync: false
       - key: ENABLE_PII_SHIELD
@@ -54,30 +68,31 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      # Qdrant Cloud
+      # ── Qdrant Cloud ─────────────────────────────────────
       - key: QDRANT_URL
         sync: false
       - key: QDRANT_API_KEY
         sync: false
       - key: QDRANT_COLLECTION
         value: documents
-      # Redis → Upstash
-      - key: REDIS_URL
-        sync: false
-      # LLM
+      # ── LLM (Groq) ───────────────────────────────────────
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
         value: llama-3.1-8b-instant
-      # App
+      # ── App ──────────────────────────────────────────────
       - key: VECTORYN_API_KEY
         sync: false
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+      - key: ENABLE_SPARSE
+        value: "false"
+      - key: ENABLE_RERANKER
+        value: "false"
       - key: ENABLE_RAGAS_EVAL
         value: "false"
       - key: ENABLE_QUERY_EXPANSION
         value: "true"
-      - key: EMBEDDING_MODEL
-        value: sentence-transformers/all-MiniLM-L6-v2
       - key: OMP_NUM_THREADS
         value: "2"
       - key: TOKENIZERS_PARALLELISM
@@ -112,8 +127,6 @@ services:
         value: ""
 
   # ── WORKER ────────────────────────────────────────────────
-  # Runs as a web service on Render free tier (background workers require paid plan).
-  # Health check is served on port WORKER_HEALTH_PORT (default 8002).
   - type: web
     name: vectoryn-worker
     runtime: docker
@@ -122,38 +135,46 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      # Kafka → Aiven Cloud (SASL/SSL)
+      # ── Kafka → Aiven Cloud (mTLS) ──────────────────────
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
+      - key: KAFKA_CA_CERT
+        sync: false
+      - key: KAFKA_ACCESS_CERT
+        sync: false
+      - key: KAFKA_ACCESS_KEY
+        sync: false
+      # Fallback SASL (solo si NO usas mTLS)
       - key: KAFKA_SASL_USERNAME
         sync: false
       - key: KAFKA_SASL_PASSWORD
-        sync: false
-      # KAFKA_CA_CERT: same Aiven CA cert as ingestion (full PEM content)
-      - key: KAFKA_CA_CERT
         sync: false
       - key: KAFKA_TOPIC_INGEST
         value: raw-documents
       - key: KAFKA_TOPIC_FAILED
         value: documents-failed
       - key: KAFKA_GROUP_ID
-        value: embedding-cluster-v3
-      # Qdrant Cloud
+        value: embedding-cluster-v4
+      # ── Qdrant Cloud ─────────────────────────────────────
       - key: QDRANT_URL
         sync: false
       - key: QDRANT_API_KEY
         sync: false
       - key: QDRANT_COLLECTION
         value: documents
-      # Worker config
+      # ── Worker config ────────────────────────────────────
       - key: EMBEDDING_MODEL
         value: sentence-transformers/all-MiniLM-L6-v2
+      - key: ENABLE_SPARSE
+        value: "false"
       - key: WORKER_BATCH_SIZE
-        value: "3"
+        value: "2"
       - key: WORKER_BATCH_TIMEOUT_MS
-        value: "500"
+        value: "2000"
       - key: WORKER_HEALTH_PORT
         value: "8002"
+      - key: WORKER_MAX_DOC_CHARS
+        value: "500000"
       - key: OMP_NUM_THREADS
         value: "1"
       - key: TOKENIZERS_PARALLELISM

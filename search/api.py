@@ -87,7 +87,10 @@ RERANK_RETRY_POOL     = int(os.getenv("RERANK_RETRY_POOL", "40"))
 STREAM_CHUNK_SIZE     = int(os.getenv("STREAM_CHUNK_SIZE", "80"))
 
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY is not configured.")
+    logger.warning(
+        "GROQ_API_KEY is not configured — search will return 503 until it is set. "
+        "Set it in Render Dashboard → vectoryn-search → Environment."
+    )
 
 _qdrant_display = QDRANT_URL if QDRANT_URL else f"{QDRANT_HOST}:{QDRANT_PORT}"
 logger.info(
@@ -217,7 +220,7 @@ else:
     qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
     logger.info(f"Connected to local Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
 
-groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 reranker    = get_reranker()
 cache       = get_cache()
 evaluator   = get_evaluator() if ENABLE_RAGAS else None
@@ -443,6 +446,12 @@ async def retrieve_knowledge(
     query:            QueryPayload,
     background_tasks: BackgroundTasks,
 ):
+    if not groq_client:
+        raise HTTPException(
+            status_code=503,
+            detail="GROQ_API_KEY not configured. Set it in Render Dashboard → vectoryn-search → Environment."
+        )
+
     request_start = time.time()
     logger.info(f"RAG_REQUEST query_length={len(query.query)} top_k={query.top_k} evaluate={query.evaluate}")
 
