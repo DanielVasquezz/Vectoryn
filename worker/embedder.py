@@ -1,26 +1,16 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v3.2
+worker/embedder.py — Vectoryn Embedding Worker v3.3
 =================================================================
 
-FIXES vs v3.1:
+FIXES vs v3.2:
 --------------
-1. TORCH IMPORT GUARD (MAIN FIX — CI BREAKAGE)
-   torch and torch.nn.functional are now imported at the TOP unconditionally,
-   but worker/requirements.txt now also lists torch so CI can install it.
-   The test file mocks sys.modules["torch"] BEFORE this module is imported,
-   so the mock takes effect correctly.
+1. MTLS FIX (MAIN FIX — bad certificate error)
+   The worker now detects KAFKA_ACCESS_CERT + KAFKA_ACCESS_KEY env vars
+   and switches to SSL (mTLS) mode automatically, which is what Aiven
+   requires. Falls back to SASL_SSL if those vars are not present.
+   Applies the same PEM newline-fix logic used for the CA cert.
 
-2. SSL / KAFKA CA CERT — same robust logic as v3.1.
-   Prioritizes KAFKA_CA_CERT env var (PEM string), writes to /tmp/aiven-ca.pem.
-   Falls back to KAFKA_CA_CERT_PATH, then certifi.
-
-3. HEALTH SERVER started before Kafka connections (Render boot health checks).
-
-4. CLEAN SHUTDOWN — consumer.close() → dlq_producer.flush() in correct order.
-
-5. L2 NORMALIZATION on dense embeddings for correct cosine similarity.
-
-6. certifi added to requirements.txt so it's always available.
+2. All other fixes from v3.2 are preserved.
 """
 import os
 import signal
@@ -79,9 +69,6 @@ HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
 
 _TESTING = os.getenv("TESTING") == "true"
 
-# These are declared at module level so @patch("worker.embedder._model") etc.
-# can find them during unit tests (TESTING=true). They are assigned real objects
-# inside the `if not _TESTING` block below when running in production.
 _tokenizer = None
 _model = None
 _sparse_model = None
@@ -130,36 +117,32 @@ if not _TESTING:
 
 
 # ─────────────────────────────────────────────────────────────
+# PEM HELPER — fixes newlines that Render may collapse
+# ─────────────────────────────────────────────────────────────
+def _fix_pem(raw: str) -> str:
+    """Restore proper PEM newlines that Render may collapse into one line."""
+    import re
+    data = raw.strip().replace("\\n", "\n")
+    if "\n" not in data and "BEGIN" in data:
+        match = re.match(
+            r"(-----BEGIN [^-]+-----)([A-Za-z0-9+/=\s]+)(-----END [^-]+-----)",
+            data,
+        )
+        if match:
+            header, body, footer = match.groups()
+            body = body.strip()
+            wrapped = "\n".join(body[i:i+64] for i in range(0, len(body), 64))
+            data = f"{header}\n{wrapped}\n{footer}\n"
+    return data
+
+
+# ─────────────────────────────────────────────────────────────
 # CA CERT  (Aiven env-var -> /tmp; else certifi)
-# Render may collapse newlines in PEM env vars - we restore them here.
-# -------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 _ca_data = os.getenv("KAFKA_CA_CERT", "").strip()
 
 if _ca_data:
-    # Fix 1: literal backslash-n -> real newline
-    _ca_data = _ca_data.replace("\\n", "\n")
-    # Fix 2: if cert is one long line with no newlines, reformat it
-    if "\n" not in _ca_data and "BEGIN CERTIFICATE" in _ca_data:
-        _ca_data = _ca_data.replace(
-            "-----BEGIN CERTIFICATE-----",
-            "-----BEGIN CERTIFICATE-----\n",
-        )
-        _ca_data = _ca_data.replace(
-            "-----END CERTIFICATE-----",
-            "\n-----END CERTIFICATE-----",
-        )
-        parts = _ca_data.split("\n")
-        reformatted = []
-        for _part in parts:
-            _part = _part.strip()
-            if not _part:
-                continue
-            if _part.startswith("-----"):
-                reformatted.append(_part)
-            else:
-                for _i in range(0, len(_part), 64):
-                    reformatted.append(_part[_i:_i + 64])
-        _ca_data = "\n".join(reformatted) + "\n"
+    _ca_data = _fix_pem(_ca_data)
     _ca_path = "/tmp/aiven-ca.pem"
     with open(_ca_path, "w") as _fh:
         _fh.write(_ca_data)
@@ -174,18 +157,53 @@ else:
 # ─────────────────────────────────────────────────────────────
 from confluent_kafka import Consumer, Producer  # noqa: E402  (after dotenv load)
 
-_KAFKA_USER = os.getenv("KAFKA_SASL_USERNAME", "")
-_KAFKA_PASS = os.getenv("KAFKA_SASL_PASSWORD", "")
+_KAFKA_USER  = os.getenv("KAFKA_SASL_USERNAME", "")
+_KAFKA_PASS  = os.getenv("KAFKA_SASL_PASSWORD", "")
+_ACCESS_CERT = os.getenv("KAFKA_ACCESS_CERT", "").strip()
+_ACCESS_KEY  = os.getenv("KAFKA_ACCESS_KEY", "").strip()
 
-_kafka_ssl_conf = {
-    "bootstrap.servers": KAFKA_BOOTSTRAP,
-    "security.protocol": "SASL_SSL",
-    "sasl.mechanism": "SCRAM-SHA-256",
-    "sasl.username": _KAFKA_USER,
-    "sasl.password": _KAFKA_PASS,
-    "ssl.ca.location": _ca_path,
-    "ssl.endpoint.identification.algorithm": "https",
-}
+# ─────────────────────────────────────────────────────────────
+# 🔥 FIX v3.3: mTLS vs SASL_SSL auto-detection
+#
+# Aiven Kafka with client certificates → SSL (mTLS)
+#   Required env vars: KAFKA_ACCESS_CERT + KAFKA_ACCESS_KEY + KAFKA_CA_CERT
+#
+# Upstash / generic cloud → SASL_SSL (SCRAM-SHA-256)
+#   Required env vars: KAFKA_SASL_USERNAME + KAFKA_SASL_PASSWORD
+# ─────────────────────────────────────────────────────────────
+if _ACCESS_CERT and _ACCESS_KEY:
+    _cert_dir  = "/tmp/kafka_certs"
+    os.makedirs(_cert_dir, exist_ok=True)
+
+    _cert_file = os.path.join(_cert_dir, "service.cert")
+    _key_file  = os.path.join(_cert_dir, "service.key")
+
+    with open(_cert_file, "w") as _f:
+        _f.write(_fix_pem(_ACCESS_CERT))
+    with open(_key_file, "w") as _f:
+        _f.write(_fix_pem(_ACCESS_KEY))
+
+    _kafka_ssl_conf = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "security.protocol": "SSL",
+        "ssl.ca.location": _ca_path,
+        "ssl.certificate.location": _cert_file,
+        "ssl.key.location": _key_file,
+        "ssl.endpoint.identification.algorithm": "https",
+    }
+    logger.info("Kafka auth mode: mTLS (SSL) — using client certificate")
+
+else:
+    _kafka_ssl_conf = {
+        "bootstrap.servers": KAFKA_BOOTSTRAP,
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "SCRAM-SHA-256",
+        "sasl.username": _KAFKA_USER,
+        "sasl.password": _KAFKA_PASS,
+        "ssl.ca.location": _ca_path,
+        "ssl.endpoint.identification.algorithm": "https",
+    }
+    logger.info("Kafka auth mode: SASL_SSL (SCRAM-SHA-256)")
 
 consumer = Consumer({
     **_kafka_ssl_conf,
