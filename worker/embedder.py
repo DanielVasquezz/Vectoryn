@@ -130,15 +130,40 @@ if not _TESTING:
 
 
 # ─────────────────────────────────────────────────────────────
-# CA CERT  (Aiven env-var → /tmp; else certifi)
-# ─────────────────────────────────────────────────────────────
+# CA CERT  (Aiven env-var -> /tmp; else certifi)
+# Render may collapse newlines in PEM env vars - we restore them here.
+# -------------------------------------------------------------------
 _ca_data = os.getenv("KAFKA_CA_CERT", "").strip()
 
 if _ca_data:
+    # Fix 1: literal backslash-n -> real newline
+    _ca_data = _ca_data.replace("\\n", "\n")
+    # Fix 2: if cert is one long line with no newlines, reformat it
+    if "\n" not in _ca_data and "BEGIN CERTIFICATE" in _ca_data:
+        _ca_data = _ca_data.replace(
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE-----\n",
+        )
+        _ca_data = _ca_data.replace(
+            "-----END CERTIFICATE-----",
+            "\n-----END CERTIFICATE-----",
+        )
+        parts = _ca_data.split("\n")
+        reformatted = []
+        for _part in parts:
+            _part = _part.strip()
+            if not _part:
+                continue
+            if _part.startswith("-----"):
+                reformatted.append(_part)
+            else:
+                for _i in range(0, len(_part), 64):
+                    reformatted.append(_part[_i:_i + 64])
+        _ca_data = "\n".join(reformatted) + "\n"
     _ca_path = "/tmp/aiven-ca.pem"
     with open(_ca_path, "w") as _fh:
         _fh.write(_ca_data)
-    logger.info("Kafka CA cert loaded from KAFKA_CA_CERT → /tmp/aiven-ca.pem")
+    logger.info(f"Kafka CA cert written to {_ca_path} ({len(_ca_data)} bytes)")
 else:
     _ca_path = os.getenv("KAFKA_CA_CERT_PATH", certifi.where())
     logger.info(f"Kafka CA cert: {_ca_path}")
