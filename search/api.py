@@ -254,6 +254,9 @@ def get_sparse_embedding(text: str) -> Optional[SparseVector]:
 
 
 def truncate_context(contexts: list[str], max_chars: int = MAX_CONTEXT_CHARS) -> list[str]:
+    # Guard: empty list → return empty (caller handles no-docs case)
+    if not contexts:
+        return []
     result, total = [], 0
     for ctx in contexts:
         if total + len(ctx) > max_chars:
@@ -505,6 +508,17 @@ async def retrieve_knowledge(
 
         raw_contexts = [hit.payload.get("content", "") for hit in final_docs]
         contexts     = truncate_context(raw_contexts)
+
+        # Guard: no documents found → return friendly message instead of crashing
+        if not contexts:
+            async def _no_docs_stream():
+                msg = (
+                    "No hay documentos indexados todavía. "
+                    "Ve a la pestaña Upload, sube un documento y espera unos segundos antes de preguntar."
+                )
+                yield msg
+            return StreamingResponse(_no_docs_stream(), media_type="text/event-stream")
+
         context_str  = _build_context_string(final_docs[:len(contexts)])
 
         retrieval_ms = round((time.time() - request_start) * 1000, 2)
