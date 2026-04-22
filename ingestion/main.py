@@ -233,8 +233,8 @@ class DocumentPayload(BaseModel):
     def content_must_not_be_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("Document content cannot be empty.")
-        if len(v) > 100_000:
-            raise ValueError("Document exceeds limit of 100,000 characters.")
+        if len(v) > 2_000_000:
+            raise ValueError("Document exceeds limit of 2,000,000 characters (approx 400 pages).")
         return v.strip()
 
 # ─────────────────────────────────────────────────────────────
