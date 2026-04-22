@@ -1,13 +1,45 @@
-# Speed up Docker build context transfer
+# ── Git & CI ──────────────────────────────────────────────────
 .git
 .gitignore
+.github/
+
+# ── Docs ──────────────────────────────────────────────────────
 *.md
-.env.example
+DEPLOY*.md
+CONTRIBUTING.md
+GUIA_*.md
+VECTORYN_*.md
+DEMO.md
+README.md
+
+# ── Dev/Test ──────────────────────────────────────────────────
 tests/
 .pytest_cache/
+pytest.ini
+ruff.toml
+Makefile
+*.sh
+*.ps1
+
+# ── Python cache ──────────────────────────────────────────────
 **/__pycache__/
 **/*.pyc
 **/*.pyo
-.github/
+**/*.pyd
+**/.mypy_cache/
+
+# ── Env files ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Docker compose (no necesario en imagen) ───────────────────
+docker-compose.yml
+
+# ── Otros ─────────────────────────────────────────────────────
 body.json
 nginx.conf
+observability/
+frontend/
+*.zip
+*.tar.gz
