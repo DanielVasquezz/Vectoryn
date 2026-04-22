@@ -1,6 +1,5 @@
-# torch: CPU-only build. In Dockerfile it's installed from the PyTorch index
-# (saves ~2.5GB vs CUDA). In CI it's installed from PyPI (smaller CPU wheel).
-# DO NOT remove — worker/embedder.py imports torch at module level.
+# torch: CPU-only build. En Dockerfile se instala desde el PyTorch index
+# (ahorra ~2.5GB vs CUDA). En CI se instala desde PyPI.
 torch>=2.2.0
 confluent-kafka==2.3.0
 qdrant-client==1.10.1
@@ -8,6 +7,9 @@ transformers==4.40.0
 python-dotenv
 certifi
 numpy<2.0.0
+
+# fastembed: SOLO se importa si ENABLE_SPARSE=true
+# Mantener en requirements para que esté disponible, pero no se carga en startup
 fastembed>=0.2.0
 
 # ── Observability ────────────────────────────────────────────

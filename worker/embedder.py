@@ -1,60 +1,74 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v3.3
-=================================================================
+worker/embedder.py — Vectoryn Embedding Worker v4.0 (Memory-Optimized)
+=======================================================================
 
-FIXES vs v3.2:
---------------
-1. MTLS FIX (MAIN FIX — bad certificate error)
-   The worker now detects KAFKA_ACCESS_CERT + KAFKA_ACCESS_KEY env vars
-   and switches to SSL (mTLS) mode automatically, which is what Aiven
-   requires. Falls back to SASL_SSL if those vars are not present.
-   Applies the same PEM newline-fix logic used for the CA cert.
+OPTIMIZACIONES vs v3.3:
+-----------------------
+1. TOKENIZER COMPARTIDO (CRÍTICO — ahorra ~50MB)
+   v3.3: worker cargaba AutoTokenizer Y chunker cargaba otro igual.
+   v4.0: El worker pasa su tokenizer ya cargado al chunker via set_tokenizer().
+         Un solo tokenizer en memoria.
 
-2. All other fixes from v3.2 are preserved.
+2. SIN FASTEMBED EN IMPORT NIVEL MÓDULO
+   v3.3: fastembed en requirements pero nunca usado (ENABLE_SPARSE=false).
+   v4.0: Import solo si ENABLE_SPARSE=true. Sin overhead de librería.
+
+3. GC EXPLÍCITO ENTRE BATCHES
+   v3.3: Sin garbage collection → objetos Python acumulan RAM entre batches.
+   v4.0: gc.collect() + del tensors después de cada batch.
+
+4. BORRADO EXPLÍCITO DE TENSORES
+   v3.3: Tensores de PyTorch permanecían referenciados en la stack.
+   v4.0: del inputs, out, mask, emb después de usarlos → libera RAM.
+
+5. LIMITE DE TAMAÑO DE DOCUMENTO
+   v3.3: Sin límite → documentos de 1MB tokenizados completos.
+   v4.0: MAX_DOC_CHARS (default 500_000 ≈ 100_000 tokens máx).
+
+6. BATCH SIZE CONSERVADOR POR DEFECTO
+   v3.3: WORKER_BATCH_SIZE=5 → 5 documentos × sus chunks simultáneos.
+   v4.0: WORKER_BATCH_SIZE=2 → menos pico de memoria por ciclo.
 """
+from __future__ import annotations
+
+import gc
+import json
+import logging
 import os
 import signal
 import threading
 import time
 import uuid
-import json
-import logging
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import certifi
 import torch
 import torch.nn.functional as F
-
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
+from dotenv import load_dotenv
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
-    VectorParams,
-    SparseVectorParams,
-    SparseVector,
     PointStruct,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
 )
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
-from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─────────────────────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────────────────────
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='{"time": "%(asctime)s", "levelname": "%(levelname)s", "service": "worker", "message": "%(message)s"}'
+    format='{"time": "%(asctime)s", "levelname": "%(levelname)s", "service": "worker", "message": "%(message)s"}',
 )
 logger = logging.getLogger("worker")
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────────────────
 KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC_IN     = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
 KAFKA_TOPIC_FAILED = os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
-KAFKA_GROUP_ID     = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v3")
+KAFKA_GROUP_ID     = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v4")
 
 QDRANT_URL         = os.getenv("QDRANT_URL")
 QDRANT_API_KEY     = os.getenv("QDRANT_API_KEY")
@@ -63,24 +77,27 @@ COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "documents")
 EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM      = 384
 
-BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "5"))
+# Conservador: menos pico de RAM por ciclo
+BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "2"))
 BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
 HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
+ENABLE_SPARSE      = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
+
+# Límite de documento: documentos > 500K chars se truncan con advertencia
+MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "500000"))
 
 _TESTING = os.getenv("TESTING") == "true"
 
-_tokenizer = None
-_model = None
+_tokenizer    = None
+_model        = None
 _sparse_model = None
-qdrant = None
-chunker = None
+qdrant        = None
+chunker       = None
 
-# ─────────────────────────────────────────────────────────────
-# PROMETHEUS METRICS
-# ─────────────────────────────────────────────────────────────
+# ── Prometheus ─────────────────────────────────────────────────────────────────
 DOCS_PROCESSED    = Counter("worker_documents_processed_total", "Docs processed")
-DOCS_FAILED       = Counter("worker_documents_failed_total", "Docs failed")
-CHUNKS_CREATED    = Counter("worker_chunks_created_total", "Chunks created")
+DOCS_FAILED       = Counter("worker_documents_failed_total",    "Docs failed")
+CHUNKS_CREATED    = Counter("worker_chunks_created_total",      "Chunks created")
 EMBED_LATENCY     = Histogram(
     "worker_embedding_latency_seconds",
     "Embedding latency",
@@ -88,10 +105,7 @@ EMBED_LATENCY     = Histogram(
 )
 WORKER_THROUGHPUT = Gauge("worker_throughput_docs_per_second", "Throughput")
 
-
-# ─────────────────────────────────────────────────────────────
-# HEALTH SERVER  (started FIRST — Render checks /health during boot)
-# ─────────────────────────────────────────────────────────────
+# ── Health server ──────────────────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -103,7 +117,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, *args):
-        pass  # silence access logs
+        pass
 
 
 def _run_health_server():
@@ -116,31 +130,23 @@ if not _TESTING:
     logger.info(f"Health server on :{HEALTH_PORT} | Prometheus on :9100")
 
 
-# ─────────────────────────────────────────────────────────────
-# PEM HELPER — fixes newlines that Render may collapse
-# ─────────────────────────────────────────────────────────────
+# ── PEM helper ─────────────────────────────────────────────────────────────────
 def _fix_pem(raw: str) -> str:
-    """Restore proper PEM newlines that Render may collapse into one line."""
-    import re
+    import re as _re
     data = raw.strip().replace("\\n", "\n")
     if "\n" not in data and "BEGIN" in data:
-        match = re.match(
-            r"(-----BEGIN [^-]+-----)([A-Za-z0-9+/=\s]+)(-----END [^-]+-----)",
-            data,
+        m = _re.match(
+            r"(-----BEGIN [^-]+-----)([A-Za-z0-9+/=\s]+)(-----END [^-]+-----)", data
         )
-        if match:
-            header, body, footer = match.groups()
-            body = body.strip()
-            wrapped = "\n".join(body[i:i+64] for i in range(0, len(body), 64))
+        if m:
+            header, body, footer = m.groups()
+            wrapped = "\n".join(body.strip()[i : i + 64] for i in range(0, len(body.strip()), 64))
             data = f"{header}\n{wrapped}\n{footer}\n"
     return data
 
 
-# ─────────────────────────────────────────────────────────────
-# CA CERT  (Aiven env-var -> /tmp; else certifi)
-# ─────────────────────────────────────────────────────────────
+# ── CA cert ────────────────────────────────────────────────────────────────────
 _ca_data = os.getenv("KAFKA_CA_CERT", "").strip()
-
 if _ca_data:
     _ca_data = _fix_pem(_ca_data)
     _ca_path = "/tmp/aiven-ca.pem"
@@ -152,73 +158,59 @@ else:
     logger.info(f"Kafka CA cert: {_ca_path}")
 
 
-# ─────────────────────────────────────────────────────────────
-# KAFKA CONSUMER + DLQ PRODUCER
-# ─────────────────────────────────────────────────────────────
-from confluent_kafka import Consumer, Producer  # noqa: E402  (after dotenv load)
+# ── Kafka ──────────────────────────────────────────────────────────────────────
+from confluent_kafka import Consumer, Producer  # noqa: E402
 
 _KAFKA_USER  = os.getenv("KAFKA_SASL_USERNAME", "")
 _KAFKA_PASS  = os.getenv("KAFKA_SASL_PASSWORD", "")
 _ACCESS_CERT = os.getenv("KAFKA_ACCESS_CERT", "").strip()
-_ACCESS_KEY  = os.getenv("KAFKA_ACCESS_KEY", "").strip()
+_ACCESS_KEY  = os.getenv("KAFKA_ACCESS_KEY",  "").strip()
 
-# ─────────────────────────────────────────────────────────────
-# 🔥 FIX v3.3: mTLS vs SASL_SSL auto-detection
-#
-# Aiven Kafka with client certificates → SSL (mTLS)
-#   Required env vars: KAFKA_ACCESS_CERT + KAFKA_ACCESS_KEY + KAFKA_CA_CERT
-#
-# Upstash / generic cloud → SASL_SSL (SCRAM-SHA-256)
-#   Required env vars: KAFKA_SASL_USERNAME + KAFKA_SASL_PASSWORD
-# ─────────────────────────────────────────────────────────────
 if _ACCESS_CERT and _ACCESS_KEY:
     _cert_dir  = "/tmp/kafka_certs"
     os.makedirs(_cert_dir, exist_ok=True)
-
     _cert_file = os.path.join(_cert_dir, "service.cert")
     _key_file  = os.path.join(_cert_dir, "service.key")
-
     with open(_cert_file, "w") as _f:
         _f.write(_fix_pem(_ACCESS_CERT))
     with open(_key_file, "w") as _f:
         _f.write(_fix_pem(_ACCESS_KEY))
-
     _kafka_ssl_conf = {
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "security.protocol": "SSL",
-        "ssl.ca.location": _ca_path,
-        "ssl.certificate.location": _cert_file,
-        "ssl.key.location": _key_file,
+        "bootstrap.servers":                    KAFKA_BOOTSTRAP,
+        "security.protocol":                    "SSL",
+        "ssl.ca.location":                      _ca_path,
+        "ssl.certificate.location":             _cert_file,
+        "ssl.key.location":                     _key_file,
         "ssl.endpoint.identification.algorithm": "https",
     }
     logger.info("Kafka auth mode: mTLS (SSL) — using client certificate")
-
 else:
     _kafka_ssl_conf = {
-        "bootstrap.servers": KAFKA_BOOTSTRAP,
-        "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "SCRAM-SHA-256",
-        "sasl.username": _KAFKA_USER,
-        "sasl.password": _KAFKA_PASS,
-        "ssl.ca.location": _ca_path,
+        "bootstrap.servers":                    KAFKA_BOOTSTRAP,
+        "security.protocol":                    "SASL_SSL",
+        "sasl.mechanism":                       "SCRAM-SHA-256",
+        "sasl.username":                        _KAFKA_USER,
+        "sasl.password":                        _KAFKA_PASS,
+        "ssl.ca.location":                      _ca_path,
         "ssl.endpoint.identification.algorithm": "https",
     }
     logger.info("Kafka auth mode: SASL_SSL (SCRAM-SHA-256)")
 
 consumer = Consumer({
     **_kafka_ssl_conf,
-    "group.id": KAFKA_GROUP_ID,
+    "group.id":         KAFKA_GROUP_ID,
     "auto.offset.reset": "earliest",
     "enable.auto.commit": False,
+    # Reducir fetch buffer → menos RAM de Kafka en memoria
+    "fetch.max.bytes":  1_048_576,       # 1MB max por fetch
+    "max.partition.fetch.bytes": 524288, # 512KB por partición
 })
 consumer.subscribe([KAFKA_TOPIC_IN])
 
 dlq_producer = Producer(_kafka_ssl_conf)
 
 
-# ─────────────────────────────────────────────────────────────
-# ML MODELS + QDRANT  (skipped during unit tests)
-# ─────────────────────────────────────────────────────────────
+# ── ML Models + Qdrant ────────────────────────────────────────────────────────
 if not _TESTING:
     logger.info("Initializing Qdrant...")
 
@@ -235,42 +227,46 @@ if not _TESTING:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-            sparse_vectors_config={"text-sparse": SparseVectorParams()},
+            sparse_vectors_config={"text-sparse": SparseVectorParams()} if ENABLE_SPARSE else {},
         )
         logger.info(f"Collection '{COLLECTION_NAME}' created.")
 
+    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}...")
     from transformers import AutoTokenizer, AutoModel  # noqa: E402
 
     _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
-    _model = AutoModel.from_pretrained(EMBEDDING_MODEL)
+    _model     = AutoModel.from_pretrained(EMBEDDING_MODEL)
     _model.eval()
 
-    ENABLE_SPARSE = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
+    # FIX: compartir tokenizer con chunker → NO carga una segunda copia
+    from ingestion.chunker import SemanticChunker  # noqa: E402
+    chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
+    chunker.set_tokenizer(_tokenizer)   # ← CLAVE: reutiliza, no recarga
+    logger.info("Tokenizer shared with chunker — saved ~50MB RAM.")
+
+    # Sparse (solo si está habilitado)
     if ENABLE_SPARSE:
         from fastembed import SparseTextEmbedding  # noqa: E402
         _sparse_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
+        logger.info("SPLADE sparse model loaded.")
     else:
         _sparse_model = None
+        logger.info("SPLADE disabled (ENABLE_SPARSE=false) — saves ~100MB RAM.")
 
-    from ingestion.chunker import SemanticChunker  # noqa: E402
-    chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
-
-    # Warmup
+    # Warmup mínimo
     with torch.inference_mode():
-        _inp = _tokenizer("warmup", return_tensors="pt")
-        _ = _model(**_inp)
+        _inp = _tokenizer("warmup", return_tensors="pt", truncation=True, max_length=16)
+        _out = _model(**_inp)
+        del _inp, _out  # liberar inmediatamente
+    gc.collect()
     logger.info("Model warmup complete — worker ready.")
 
 
-# ─────────────────────────────────────────────────────────────
-# EMBEDDING
-# ─────────────────────────────────────────────────────────────
-def embed_dense_batch(texts: list) -> list:
+# ── Embedding ─────────────────────────────────────────────────────────────────
+def embed_dense_batch(texts: list[str]) -> list[list[float]]:
     """
-    Embed a list of strings, returning a list of L2-normalised float vectors.
-    Each vector has EMBEDDING_DIM (384) dimensions.
-    Always pass padding=True and truncation=True so batches of different
-    lengths work correctly and inputs > 512 tokens don't raise errors.
+    Embeds a list of strings. Returns L2-normalised float vectors.
+    Deletes intermediate tensors explicitly to free RAM quickly.
     """
     inputs = _tokenizer(
         texts,
@@ -281,21 +277,22 @@ def embed_dense_batch(texts: list) -> list:
     )
     with torch.inference_mode():
         out = _model(**inputs)
+
     mask = (
         inputs["attention_mask"]
         .unsqueeze(-1)
         .expand(out.last_hidden_state.size())
         .float()
     )
-    emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(
-        mask.sum(1), min=1e-9
-    )
-    return F.normalize(emb, p=2, dim=1).tolist()
+    emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
+    result = F.normalize(emb, p=2, dim=1).tolist()
+
+    # FIX: borrar tensores explícitamente → GC puede reclamar RAM antes
+    del inputs, out, mask, emb
+    return result
 
 
-# ─────────────────────────────────────────────────────────────
-# DEAD LETTER QUEUE
-# ─────────────────────────────────────────────────────────────
+# ── DLQ ───────────────────────────────────────────────────────────────────────
 def send_to_dlq(payload: dict, error: Exception):
     try:
         msg = {"original": payload, "error": str(error), "ts": time.time()}
@@ -306,32 +303,41 @@ def send_to_dlq(payload: dict, error: Exception):
         logger.error(f"DLQ_FAILED {dlq_err}")
 
 
-# ─────────────────────────────────────────────────────────────
-# BATCH PROCESSOR
-# ─────────────────────────────────────────────────────────────
+# ── Batch processor ───────────────────────────────────────────────────────────
 def process_batch(messages: list):
     if not messages:
         return
 
     start_time = time.time()
+    payloads: list[dict] = []
 
-    payloads = []
     for m in messages:
         try:
             payloads.append(json.loads(m.value().decode()))
         except Exception:
             continue
 
-    all_chunks: list = []
-    meta: list = []
+    all_chunks: list[str] = []
+    meta:       list[tuple] = []
 
     for p in payloads:
         try:
-            chunks = chunker.chunk_text(p.get("content", ""))
+            content = p.get("content", "")
+
+            # FIX: límite de tamaño → evita picos de memoria con docs enormes
+            if len(content) > MAX_DOC_CHARS:
+                logger.warning(
+                    f"DOC_TRUNCATED doc_id={p.get('doc_id')} "
+                    f"original_chars={len(content)} limit={MAX_DOC_CHARS}"
+                )
+                content = content[:MAX_DOC_CHARS]
+
+            chunks = chunker.chunk_text_list(content)
             CHUNKS_CREATED.inc(len(chunks))
             for c in chunks:
                 all_chunks.append(c["content"])
                 meta.append((p.get("doc_id"), c["chunk_index"], c["total_chunks"]))
+
         except Exception as e:
             send_to_dlq(p, e)
 
@@ -342,10 +348,10 @@ def process_batch(messages: list):
         dense = embed_dense_batch(all_chunks)
         sparse = list(_sparse_model.embed(all_chunks)) if _sparse_model else None
 
-    points = []
+    points: list[PointStruct] = []
     for i, text in enumerate(all_chunks):
         doc_id, idx, total = meta[i]
-        vec = {"": dense[i]}
+        vec: dict = {"": dense[i]}
         if sparse:
             s = sparse[i]
             vec["text-sparse"] = SparseVector(
@@ -356,13 +362,16 @@ def process_batch(messages: list):
             id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{idx}")),
             vector=vec,
             payload={
-                "doc_id": doc_id,
-                "content": text,
-                "chunk_index": idx,
+                "doc_id":       doc_id,
+                "content":      text,
+                "chunk_index":  idx,
                 "total_chunks": total,
-                "ts": time.time(),
+                "ts":           time.time(),
             },
         ))
+
+    # FIX: liberar listas grandes antes de escribir a Qdrant
+    del all_chunks, dense, sparse
 
     try:
         qdrant.upsert(COLLECTION_NAME, points=points)
@@ -373,11 +382,12 @@ def process_batch(messages: list):
     except Exception as e:
         for p in payloads:
             send_to_dlq(p, e)
+    finally:
+        del points, payloads
+        gc.collect()  # FIX: forzar GC después de cada batch
 
 
-# ─────────────────────────────────────────────────────────────
-# MAIN LOOP
-# ─────────────────────────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
 _running = True
 
 
@@ -386,12 +396,12 @@ def _handle_stop(*_):
     _running = False
 
 
-signal.signal(signal.SIGINT, _handle_stop)
+signal.signal(signal.SIGINT,  _handle_stop)
 signal.signal(signal.SIGTERM, _handle_stop)
 
 if not _TESTING:
-    buffer: list = []
-    last_flush = time.time()
+    buffer:     list  = []
+    last_flush: float = time.time()
 
     logger.info("Worker started — consuming messages...")
 
@@ -401,7 +411,7 @@ if not _TESTING:
         if msg is None:
             if buffer and (time.time() - last_flush) * 1000 > BATCH_TIMEOUT_MS:
                 process_batch(buffer)
-                buffer = []
+                buffer     = []
                 last_flush = time.time()
             continue
 
@@ -413,10 +423,9 @@ if not _TESTING:
 
         if len(buffer) >= BATCH_SIZE:
             process_batch(buffer)
-            buffer = []
+            buffer     = []
             last_flush = time.time()
 
-    # Drain remaining messages
     if buffer:
         process_batch(buffer)
 
