@@ -63,11 +63,15 @@
         <div class="upload-types">.txt · .md · .pdf</div>
       </div>
 
+      <div id="kafkaWarning" class="kafka-warning hidden">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>El servicio de ingestion no está disponible. Es posible que Kafka no esté conectado. Revisa la pestaña <strong>System</strong> y verifica las variables de entorno <code>KAFKA_BOOTSTRAP_SERVERS</code>.</span>
+      </div>
       <div class="divider-or"><span>or write directly</span></div>
 
       <div class="field-group">
         <label class="field-label">Document Title</label>
-        <input id="docId" type="text" class="field-input" placeholder="e.g., product-manual-2024" />
+        <input id="docId" type="text" class="field-input" oninput="onDocIdInput(this)" placeholder="e.g., product-manual-2024" />
       </div>
       <div class="field-group">
         <label class="field-label">
@@ -98,6 +102,7 @@
           <div class="svc-info">
             <span class="svc-name">Gateway</span>
             <span class="svc-port">:8080</span>
+            <span class="svc-detail" id="svc-gateway-detail">checking…</span>
           </div>
         </div>
         <div class="service-item" id="svc-ingestion">
@@ -105,6 +110,7 @@
           <div class="svc-info">
             <span class="svc-name">Ingestion</span>
             <span class="svc-port">:8000</span>
+            <span class="svc-detail" id="svc-ingestion-detail">checking…</span>
           </div>
         </div>
         <div class="service-item" id="svc-search">
@@ -112,6 +118,7 @@
           <div class="svc-info">
             <span class="svc-name">Search</span>
             <span class="svc-port">:8001</span>
+            <span class="svc-detail" id="svc-search-detail">checking…</span>
           </div>
         </div>
         <div class="service-item" id="svc-qdrant">
@@ -119,6 +126,7 @@
           <div class="svc-info">
             <span class="svc-name">Qdrant</span>
             <span class="svc-port">:6333</span>
+            <span class="svc-detail" id="svc-qdrant-detail">checking…</span>
           </div>
         </div>
         <div class="service-item" id="svc-kafka">
@@ -126,6 +134,7 @@
           <div class="svc-info">
             <span class="svc-name">Kafka</span>
             <span class="svc-port">:9092</span>
+            <span class="svc-detail" id="svc-kafka-detail">checking…</span>
           </div>
         </div>
         <div class="service-item" id="svc-redis">
@@ -133,6 +142,7 @@
           <div class="svc-info">
             <span class="svc-name">Redis</span>
             <span class="svc-port">:6379</span>
+            <span class="svc-detail" id="svc-redis-detail">checking…</span>
           </div>
         </div>
       </div>

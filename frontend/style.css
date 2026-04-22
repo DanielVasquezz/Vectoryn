@@ -313,6 +313,7 @@ body {
 
 .feedback.success { background: rgba(34,197,94,0.1); color: #4ade80; border: 1px solid rgba(34,197,94,0.2); }
 .feedback.error   { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+.feedback.warn    { background: rgba(245,158,11,0.1); color: #fbbf24; border: 1px solid rgba(245,158,11,0.2); }
 
 .doc-item {
   display: flex;
@@ -837,3 +838,49 @@ body {
 
 /* ── SCROLLBAR ──────────────────────────────────────────────── */
 * { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+
+/* ── ADDITIONS: VALIDATION & IMPROVED UI ──────────────────── */
+.doc-item-chars { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text3); flex-shrink: 0; margin-right: 4px; }
+
+/* Field validation */
+.field-error { border-color: rgba(239,68,68,0.6) !important; }
+.field-error:focus { border-color: #ef4444 !important; box-shadow: 0 0 0 2px rgba(239,68,68,0.15) !important; }
+.field-error-msg { display: block; font-size: 11px; color: #f87171; margin-top: 4px; }
+.char-count-warn  { color: var(--amber) !important; }
+.char-count-error { color: var(--red)   !important; }
+.feedback.warn    { background: rgba(245,158,11,0.1); color: #fbbf24; border: 1px solid rgba(245,158,11,0.2); }
+
+/* Service detail text */
+.svc-detail { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text3); }
+.service-item.warn .svc-dot { background: var(--amber); box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+
+/* Kafka warning banner */
+.kafka-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.25);
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+  font-size: 11.5px;
+  color: #fbbf24;
+  line-height: 1.5;
+}
+.kafka-warning svg { flex-shrink:0; margin-top:1px; }
+
+/* Loading button */
+.btn-primary.loading { opacity: 0.6; cursor: wait; }
+
+/* Input shake */
+@keyframes shake {
+  0%,100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  60% { transform: translateX(4px); }
+}
+.input-shake { animation: shake 0.35s ease; }
+
+/* System message */
+.message.system-msg { justify-content: center; padding: 4px 0; }
+.warn-bubble { background: rgba(245,158,11,0.08) !important; border: 1px solid rgba(245,158,11,0.2) !important; color: #fbbf24 !important; font-size:12.5px; }
