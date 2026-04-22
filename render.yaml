@@ -109,16 +109,11 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
+      # ⚠️ URLs completas con https:// — fromService.property:host no incluye el scheme
       - key: INGESTION_SERVICE_URL
-        fromService:
-          name: vectoryn-ingestion
-          type: web
-          property: host
+        value: "https://vectoryn-ingestion.onrender.com"
       - key: SEARCH_SERVICE_URL
-        fromService:
-          name: vectoryn-search
-          type: web
-          property: host
+        value: "https://vectoryn-search.onrender.com"
       - key: VECTORYN_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
