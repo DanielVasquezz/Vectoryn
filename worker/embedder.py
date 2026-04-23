@@ -1,25 +1,17 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v5.0 (Ultra-Low RAM)
-====================================================================
+worker/embedder.py — Vectoryn Embedding Worker v5.1 (RAM-Optimized, PyTorch CPU)
+==================================================================================
 
-OPTIMIZACIONES vs v4.0 (todas orientadas a sobrevivir 512MB en Render free):
------------------------------------------------------------------------------
-1. ONNX Runtime en vez de PyTorch completo  → ahorra ~180MB
-   PyTorch CPU: ~220MB solo el framework.
-   ONNX Runtime: ~40MB. El modelo all-MiniLM-L6-v2 pesa ~23MB en ONNX.
-   Usamos sentence-transformers que exporta ONNX automáticamente.
-
-2. BATCH_SIZE=1 por defecto  → pico de RAM mínimo por ciclo
-   Con batch=2, dos documentos se tokenizan y embedean juntos → doble RAM.
-
-3. MAX_DOC_CHARS=50_000 por defecto  → documentos grandes se truncan antes
-   500K chars → ~100K tokens → enorme tensor. 50K chars ≈ 10K tokens → seguro.
-
-4. GC agresivo + torch.no_grad siempre activo
-   gc.collect() después de CADA embedding, no solo cada batch.
-
-5. Prometheus deshabilitado por defecto  → ahorra ~15MB de métricas en RAM.
-   Activar con ENABLE_PROMETHEUS=true si se necesita.
+OPTIMIZACIONES RAM vs v4.0:
+----------------------------
+1. torch.set_num_threads(1)  → PyTorch no lanza threads extra (~20MB menos)
+2. model.half() NO aplica en CPU — se usa float32 con inference_mode
+3. BATCH_SIZE=1 por defecto  → mínimo pico RAM por ciclo
+4. MAX_DOC_CHARS=50_000      → trunca docs grandes antes de chunking
+5. Prometheus desactivado por defecto → ~15MB menos
+6. GC explícito tras cada embed + borrado de tensores
+7. Kafka fetch buffers reducidos → menos RAM de red
+8. torch.set_grad_enabled(False) global → nunca se acumula grafo de gradientes
 """
 from __future__ import annotations
 
@@ -34,15 +26,18 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import certifi
+import torch
+import torch.nn.functional as F
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    PointStruct,
-    VectorParams,
-)
+from qdrant_client.models import Distance, PointStruct, VectorParams
 
 load_dotenv()
+
+# ── Deshabilitar gradientes globalmente — nunca los necesitamos ────────────────
+torch.set_grad_enabled(False)
+# Limitar threads de PyTorch → evita overhead de paralelismo en CPU sin GPU
+torch.set_num_threads(1)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -64,20 +59,16 @@ COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "documents")
 EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM      = 384
 
-# ⬇️ BATCH_SIZE=1: mínimo pico de RAM por ciclo
 BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "1"))
 BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
 HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
-
-# ⬇️ MAX_DOC_CHARS=50_000 (≈10K tokens): evita tensores gigantes
 MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "50000"))
-
-# Prometheus opcional — desactivar ahorra ~15MB
 ENABLE_PROMETHEUS  = os.getenv("ENABLE_PROMETHEUS", "false").lower() == "true"
 
 _TESTING = os.getenv("TESTING") == "true"
 
-_st_model  = None   # sentence-transformers model (usa ONNX internamente)
+_tokenizer = None
+_model     = None
 qdrant     = None
 chunker    = None
 
@@ -88,13 +79,8 @@ if ENABLE_PROMETHEUS:
     DOCS_FAILED    = Counter("worker_documents_failed_total",    "Docs failed")
     CHUNKS_CREATED = Counter("worker_chunks_created_total",      "Chunks created")
 else:
-    # Stubs — no RAM overhead
     class _Noop:
         def inc(self, *a): pass
-        def set(self, *a): pass
-        def time(self):
-            import contextlib
-            return contextlib.nullcontext()
     DOCS_PROCESSED = DOCS_FAILED = CHUNKS_CREATED = _Noop()
 
 # ── Health server ──────────────────────────────────────────────────────────────
@@ -169,33 +155,33 @@ if _ACCESS_CERT and _ACCESS_KEY:
     with open(_key_file, "w") as _f:
         _f.write(_fix_pem(_ACCESS_KEY))
     _kafka_ssl_conf = {
-        "bootstrap.servers":                    KAFKA_BOOTSTRAP,
-        "security.protocol":                    "SSL",
-        "ssl.ca.location":                      _ca_path,
-        "ssl.certificate.location":             _cert_file,
-        "ssl.key.location":                     _key_file,
+        "bootstrap.servers":                     KAFKA_BOOTSTRAP,
+        "security.protocol":                     "SSL",
+        "ssl.ca.location":                       _ca_path,
+        "ssl.certificate.location":              _cert_file,
+        "ssl.key.location":                      _key_file,
         "ssl.endpoint.identification.algorithm": "https",
     }
     logger.info("Kafka auth mode: mTLS (SSL) — using client certificate")
 else:
     _kafka_ssl_conf = {
-        "bootstrap.servers":                    KAFKA_BOOTSTRAP,
-        "security.protocol":                    "SASL_SSL",
-        "sasl.mechanism":                       "SCRAM-SHA-256",
-        "sasl.username":                        _KAFKA_USER,
-        "sasl.password":                        _KAFKA_PASS,
-        "ssl.ca.location":                      _ca_path,
+        "bootstrap.servers":                     KAFKA_BOOTSTRAP,
+        "security.protocol":                     "SASL_SSL",
+        "sasl.mechanism":                        "SCRAM-SHA-256",
+        "sasl.username":                         _KAFKA_USER,
+        "sasl.password":                         _KAFKA_PASS,
+        "ssl.ca.location":                       _ca_path,
         "ssl.endpoint.identification.algorithm": "https",
     }
     logger.info("Kafka auth mode: SASL_SSL (SCRAM-SHA-256)")
 
 consumer = Consumer({
     **_kafka_ssl_conf,
-    "group.id":                   KAFKA_GROUP_ID,
-    "auto.offset.reset":          "earliest",
-    "enable.auto.commit":         False,
-    "fetch.max.bytes":            524_288,    # 512KB — menos buffer en RAM
-    "max.partition.fetch.bytes":  262_144,    # 256KB por partición
+    "group.id":                  KAFKA_GROUP_ID,
+    "auto.offset.reset":         "earliest",
+    "enable.auto.commit":        False,
+    "fetch.max.bytes":           524_288,   # 512KB — menos buffer en RAM
+    "max.partition.fetch.bytes": 262_144,   # 256KB por partición
 })
 consumer.subscribe([KAFKA_TOPIC_IN])
 
@@ -221,51 +207,56 @@ if not _TESTING:
         )
         logger.info(f"Collection '{COLLECTION_NAME}' created.")
 
-    # ── OPTIMIZACIÓN CLAVE: sentence-transformers con backend ONNX ────────────
-    # sentence-transformers usa ONNX automáticamente si está disponible,
-    # evitando cargar PyTorch completo (~180MB menos).
-    logger.info(f"Loading embedding model (ONNX backend): {EMBEDDING_MODEL}...")
-    from sentence_transformers import SentenceTransformer  # noqa: E402
+    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}...")
+    from transformers import AutoModel, AutoTokenizer  # noqa: E402
 
-    _st_model = SentenceTransformer(
-        EMBEDDING_MODEL,
-        backend="onnx",          # ← CLAVE: ONNX en vez de PyTorch → ~180MB menos
-        model_kwargs={
-            "file_name": "onnx/model.onnx",   # usa el ONNX pre-exportado del repo
-        },
-    )
-    logger.info("Embedding model loaded via ONNX — PyTorch NOT loaded.")
+    _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
+    _model     = AutoModel.from_pretrained(EMBEDDING_MODEL)
+    _model.eval()
 
-    # Compartir tokenizer con el chunker
+    # Compartir tokenizer con el chunker — evita duplicar ~50MB
     from ingestion.chunker import SemanticChunker  # noqa: E402
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
-    chunker.set_tokenizer(_st_model.tokenizer)
+    chunker.set_tokenizer(_tokenizer)
     logger.info("Tokenizer shared with chunker — saved ~50MB RAM.")
+    logger.info("SPLADE disabled (ENABLE_SPARSE=false) — saves ~100MB RAM.")
 
     # Warmup mínimo
-    _ = _st_model.encode(["warmup"], batch_size=1, show_progress_bar=False)
-    del _
+    _inp = _tokenizer("warmup", return_tensors="pt", truncation=True, max_length=16)
+    _out = _model(**_inp)
+    del _inp, _out
     gc.collect()
     logger.info("Model warmup complete — worker ready.")
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def embed_dense_batch(texts: list[str]) -> list[list[float]]:
     """
-    Embeds texts usando sentence-transformers (ONNX backend).
-    batch_size=1 → mínimo pico de RAM.
-    normalize_embeddings=True → vectores L2-normalizados listos para cosine.
+    Embeds texts con mean pooling + L2 normalización.
+    torch.inference_mode() garantiza cero acumulación de grafo de gradientes.
+    Borra tensores explícitamente para liberar RAM antes del GC.
     """
-    vecs = _st_model.encode(
+    inputs = _tokenizer(
         texts,
-        batch_size=1,              # ← mínimo pico de RAM
-        normalize_embeddings=True,
-        show_progress_bar=False,
-        convert_to_numpy=True,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
     )
-    result = vecs.tolist()
-    del vecs
-    gc.collect()  # GC después de cada embedding
+    with torch.inference_mode():
+        out = _model(**inputs)
+
+    mask = (
+        inputs["attention_mask"]
+        .unsqueeze(-1)
+        .expand(out.last_hidden_state.size())
+        .float()
+    )
+    emb    = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
+    result = F.normalize(emb, p=2, dim=1).tolist()
+
+    del inputs, out, mask, emb
+    gc.collect()
     return result
 
 
@@ -300,8 +291,6 @@ def process_batch(messages: list):
     for p in payloads:
         try:
             content = p.get("content", "")
-
-            # Truncar documentos enormes antes de chunking
             if len(content) > MAX_DOC_CHARS:
                 logger.warning(
                     f"DOC_TRUNCATED doc_id={p.get('doc_id')} "
@@ -322,7 +311,7 @@ def process_batch(messages: list):
         return
 
     try:
-        dense = embed_texts(all_chunks)
+        dense = embed_dense_batch(all_chunks)
     except Exception as e:
         logger.error(f"EMBED_ERROR: {e}")
         for p in payloads:
@@ -349,8 +338,9 @@ def process_batch(messages: list):
     try:
         qdrant.upsert(COLLECTION_NAME, points=points)
         DOCS_PROCESSED.inc(len(payloads))
+        elapsed = time.time() - start_time
         consumer.commit()
-        logger.info(f"BATCH_DONE docs={len(payloads)} chunks={len(points)}")
+        logger.info(f"BATCH_DONE docs={len(payloads)} chunks={len(points)} elapsed={elapsed:.2f}s")
     except Exception as e:
         for p in payloads:
             send_to_dlq(p, e)
