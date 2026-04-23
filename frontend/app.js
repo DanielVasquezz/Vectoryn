@@ -1,75 +1,82 @@
-// Auto-detects local vs production
+/* ═══════════════════════════════════════════════════════
+   VECTORYN app.js v2.0
+   — No writing blocked while searching
+   — Full responsive
+   — Theme system
+   — Big-tech micro-interactions
+═══════════════════════════════════════════════════════ */
+
 const CONFIG = window.VECTORYN_CONFIG || {
   GATEWAY_URL: 'http://localhost:8080',
   API_KEY:     'your_secret_key_here',
 };
 
+// ── STATE ──────────────────────────────────────────────
 const state = {
   queryCount:    0,
   ingestCount:   0,
   totalLatency:  0,
-  isSearching:   false,
+  isSearching:   false,          // ← never blocks typing, only the send button
   chats:         [],
   activeChatId:  null,
   serviceStatus: { gateway: null, ingestion: null, search: null },
-  kafkaWarning:  false,
 };
 
 const $ = id => document.getElementById(id);
 
-/* ── VALIDATION HELPERS ─────────────────────────────────────── */
-const VALIDATION = {
-  MIN_CONTENT_LENGTH: 10,
-  MAX_CONTENT_LENGTH: 2_000_000,
-  MIN_QUERY_LENGTH:   2,
-  MAX_QUERY_LENGTH:   2000,
-  VALID_DOC_ID:       /^[a-zA-Z0-9_\-\.]+$/,
-
-  content(text) {
-    if (!text || !text.trim()) return 'El contenido no puede estar vacío.';
-    if (text.trim().length < this.MIN_CONTENT_LENGTH)
-      return `El contenido debe tener al menos ${this.MIN_CONTENT_LENGTH} caracteres.`;
-    if (text.length > this.MAX_CONTENT_LENGTH)
-      return `El contenido excede el límite de 2,000,000 caracteres.`;
-    return null;
-  },
-
-  docId(id) {
-    if (!id) return null; // optional
-    if (id.length > 100) return 'El ID del documento no puede superar 100 caracteres.';
-    if (!this.VALID_DOC_ID.test(id))
-      return 'El ID solo puede contener letras, números, guiones, puntos y guiones bajos.';
-    return null;
-  },
-
-  query(text) {
-    if (!text || !text.trim()) return 'Escribe una pregunta.';
-    if (text.trim().length < this.MIN_QUERY_LENGTH)
-      return `La pregunta debe tener al menos ${this.MIN_QUERY_LENGTH} caracteres.`;
-    if (text.length > this.MAX_QUERY_LENGTH)
-      return `La pregunta no puede superar ${this.MAX_QUERY_LENGTH} caracteres.`;
-    return null;
-  },
-};
-
-/* ── TAB SWITCHING ──────────────────────────────────────────── */
-function switchTab(tab, btn) {
-  document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  ['chat', 'upload', 'status'].forEach(t => {
-    const el = $(`tab-${t}`);
-    if (el) el.classList.toggle('hidden', t !== tab);
+// ── THEME ──────────────────────────────────────────────
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('vx-theme', theme);
+  document.querySelectorAll('.swatch').forEach(s => {
+    s.classList.toggle('active', s.dataset.theme === theme);
   });
 }
 
-/* ── HEALTH CHECK ───────────────────────────────────────────── */
+function toggleThemePicker() {
+  const picker = $('themePicker');
+  picker.classList.toggle('hidden');
+}
+
+document.addEventListener('click', e => {
+  const dock = document.querySelector('.theme-dock');
+  if (dock && !dock.contains(e.target)) {
+    $('themePicker')?.classList.add('hidden');
+  }
+});
+
+// ── SIDEBAR (mobile) ───────────────────────────────────
+function openSidebar() {
+  $('sidebar').classList.add('open');
+  const ov = $('overlay');
+  ov.classList.remove('hidden');
+  requestAnimationFrame(() => ov.classList.add('visible'));
+}
+
+function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  const ov = $('overlay');
+  ov.classList.remove('visible');
+  setTimeout(() => ov.classList.add('hidden'), 200);
+}
+
+// ── TABS ───────────────────────────────────────────────
+function switchTab(tab, btn) {
+  document.querySelectorAll('.pill').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  ['chat','upload','status'].forEach(t => {
+    $(`tab-${t}`)?.classList.toggle('hidden', t !== tab);
+  });
+}
+
+// ── HEALTH CHECK ──────────────────────────────────────
 async function checkHealth() {
-  const indicator = $('systemBadge');
-  if (indicator) indicator.dataset.checking = 'true';
+  const refreshBtn = document.querySelector('.btn-refresh');
+  refreshBtn?.classList.add('spinning');
 
   try {
     const res  = await fetch(`${CONFIG.GATEWAY_URL}/health`, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(6000),
     });
     const data = await res.json().catch(() => ({}));
 
@@ -79,77 +86,66 @@ async function checkHealth() {
 
     state.serviceStatus = { gateway: gwOk, ingestion: ingOk, search: srOk };
 
-    setStatus('svc-gateway',   gwOk,  data.gateway  || (gwOk ? 'ok' : 'error'));
-    setStatus('svc-ingestion', ingOk, data.ingestion || 'unknown');
-    setStatus('svc-search',    srOk,  data.search    || 'unknown');
-    // Qdrant y Kafka se infieren del servicio de ingestion/search
-    setStatus('svc-qdrant',    ingOk && srOk, ingOk && srOk ? 'connected' : 'unknown');
-    setStatus('svc-kafka',     ingOk, ingOk ? 'connected' : 'not reachable');
-    setStatus('svc-redis',     srOk,  srOk  ? 'connected' : 'unknown');
+    setSvc('svc-gateway',   gwOk,  gwOk  ? 'ok' : 'error');
+    setSvc('svc-ingestion', ingOk, ingOk ? 'ok' : 'down');
+    setSvc('svc-search',    srOk,  srOk  ? 'ok' : 'down');
+    setSvc('svc-qdrant',    ingOk && srOk, ingOk && srOk ? 'ok' : '—');
+    setSvc('svc-kafka',     ingOk, ingOk ? 'ok' : '—');
+    setSvc('svc-redis',     srOk,  srOk  ? 'ok' : '—');
 
     const allOk = gwOk && ingOk && srOk;
     const someOk = gwOk && (ingOk || srOk);
 
     setBadge(
       allOk ? 'ok' : someOk ? 'warn' : 'error',
-      allOk ? 'Todos los servicios activos'
-            : someOk ? 'Algunos servicios degradados'
-            : 'Sin conexión al gateway'
+      allOk ? 'All services active'
+            : someOk ? 'Degraded'
+            : 'Disconnected'
     );
 
-    // Mostrar warning de Kafka si el servicio de ingestion reporta problemas
-    if (!ingOk && gwOk) {
-      showKafkaWarning();
-    } else {
-      hideKafkaWarning();
+    // Mobile dot
+    const mobDot = $('mobStatusDot');
+    if (mobDot) {
+      mobDot.className = 'mob-status-dot ' + (allOk ? 'ok' : someOk ? 'warn' : 'error');
     }
 
-  } catch (e) {
+    if (!ingOk && gwOk) $('kafkaWarning')?.classList.remove('hidden');
+    else                $('kafkaWarning')?.classList.add('hidden');
+
+  } catch {
     state.serviceStatus = { gateway: false, ingestion: false, search: false };
     ['svc-gateway','svc-ingestion','svc-search','svc-qdrant','svc-kafka','svc-redis']
-      .forEach(id => setStatus(id, false, 'no connection'));
-    setBadge('error', 'Sin conexión al gateway');
+      .forEach(id => setSvc(id, false, '—'));
+    setBadge('error', 'Disconnected');
   } finally {
-    if (indicator) delete indicator.dataset.checking;
+    setTimeout(() => refreshBtn?.classList.remove('spinning'), 500);
   }
 }
 
-function setStatus(id, up, detail) {
+function setSvc(id, up, badge) {
   const el = $(id);
   if (!el) return;
-  el.classList.remove('up', 'down', 'warn');
+  el.classList.remove('up','down');
   el.classList.add(up ? 'up' : 'down');
-  const detailEl = el.querySelector('.svc-detail');
-  if (detailEl && detail) detailEl.textContent = detail;
+  const b = $(`${id}-badge`);
+  if (b) b.textContent = badge;
 }
 
 function setBadge(st, text) {
   const el = $('systemBadge');
   if (!el) return;
-  el.className = `system-badge ${st}`;
+  el.className = `sys-badge ${st}`;
   el.querySelector('span').textContent = text;
 }
 
-function showKafkaWarning() {
-  if (state.kafkaWarning) return;
-  state.kafkaWarning = true;
-  const w = $('kafkaWarning');
-  if (w) w.classList.remove('hidden');
-}
-
-function hideKafkaWarning() {
-  state.kafkaWarning = false;
-  const w = $('kafkaWarning');
-  if (w) w.classList.add('hidden');
-}
-
-/* ── CHAT MANAGEMENT ────────────────────────────────────────── */
+// ── CHAT MANAGEMENT ───────────────────────────────────
 function newChat() {
-  const chat = { id: Date.now(), title: 'Nueva conversación', messages: [] };
+  const chat = { id: Date.now(), title: 'New conversation', messages: [] };
   state.chats.unshift(chat);
   state.activeChatId = chat.id;
   renderHistory();
   showWelcome();
+  closeSidebar();
 }
 
 function loadChat(id) {
@@ -161,10 +157,11 @@ function loadChat(id) {
   const box = $('chatBox');
   box.innerHTML = '';
   chat.messages.forEach(m => {
-    if (m.role === 'user') renderUserBubble(m.content, m.time);
-    else renderAIBubble(m.content, m.time);
+    if (m.role === 'user') renderUserBubble(m.content, m.time, false);
+    else renderAIBubble(m.content, m.time, false, false);
   });
   scrollToBottom();
+  closeSidebar();
 }
 
 function renderHistory() {
@@ -172,14 +169,14 @@ function renderHistory() {
   if (!list) return;
   if (!state.chats.length) {
     list.innerHTML = `<div class="history-empty">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <span>Aún no hay conversaciones</span>
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <p>No conversations yet</p><span>Start by asking a question</span>
     </div>`;
     return;
   }
   list.innerHTML = state.chats.map(c => `
     <div class="history-item ${c.id === state.activeChatId ? 'active' : ''}" onclick="loadChat(${c.id})">
-      <svg class="history-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:.4"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       ${esc(c.title)}
     </div>`).join('');
 }
@@ -201,7 +198,7 @@ function useSuggestion(btn) {
   handleSearch();
 }
 
-/* ── INGESTION ──────────────────────────────────────────────── */
+// ── INGESTION ─────────────────────────────────────────
 async function handleIngest() {
   const contentEl = $('docContent');
   const docIdEl   = $('docId');
@@ -210,36 +207,28 @@ async function handleIngest() {
   const btn       = $('ingestBtn');
   const btnText   = $('ingestBtnText');
 
-  // Clear previous errors
-  clearFieldError('docContent');
-  clearFieldError('docId');
+  clearFieldErr('docContent');
+  clearFieldErr('docId');
 
-  // Validate
-  const contentErr = VALIDATION.content(content);
-  if (contentErr) {
-    showFieldError('docContent', contentErr);
-    showFeedback(contentErr, 'error');
-    contentEl.focus();
+  if (!content || content.length < 10) {
+    showFieldErr('docContent', 'Content must be at least 10 characters.');
+    contentEl?.focus();
     return;
   }
-
-  const idErr = VALIDATION.docId(docId);
-  if (idErr) {
-    showFieldError('docId', idErr);
-    showFeedback(idErr, 'error');
-    docIdEl.focus();
+  if (content.length > 2_000_000) {
+    showFieldErr('docContent', 'Content exceeds the 2,000,000 character limit.');
     return;
   }
-
-  // Check if services are available
-  if (state.serviceStatus.ingestion === false) {
-    showFeedback('⚠ El servicio de ingestion no está disponible. Revisa la pestaña System.', 'warn');
+  if (docId && !/^[a-zA-Z0-9_\-\.]+$/.test(docId)) {
+    showFieldErr('docId', 'ID can only contain letters, numbers, dashes, dots, and underscores.');
+    docIdEl?.focus();
     return;
   }
 
   btn.disabled = true;
   btn.classList.add('loading');
-  btnText.textContent = 'Indexando…';
+  btnText.textContent = 'Indexing…';
+  showFeedback('', '');
 
   const payload = { id: docId || `doc_${Date.now()}`, content };
 
@@ -251,11 +240,11 @@ async function handleIngest() {
       signal:  AbortSignal.timeout(30_000),
     });
 
-    if (res.status === 401) throw new Error('API Key inválida. Verifica tu configuración.');
-    if (res.status === 429) throw new Error('Límite de peticiones alcanzado. Espera un momento.');
+    if (res.status === 401) throw new Error('Invalid API Key. Check your configuration.');
+    if (res.status === 429) throw new Error('Rate limit reached. Please wait a moment.');
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Error del servidor (${res.status})`);
+      throw new Error(err.detail || `Server error (${res.status})`);
     }
 
     const data = await res.json();
@@ -266,174 +255,146 @@ async function handleIngest() {
     docIdEl.value   = '';
     onContentInput(contentEl);
 
-    let msg = `✓ Documento indexado correctamente (ID: ${data.doc_id || payload.id}).`;
-    if (data.anonymized) msg += ' Se enmascaró información sensible (PII).';
-    msg += ' Disponible para consulta en ~5 segundos.';
+    let msg = `✓ Document indexed (ID: ${data.doc_id || payload.id}).`;
+    if (data.anonymized) msg += ' Sensitive data was masked (PII).';
+    msg += ' Available in ~5 seconds.';
     showFeedback(msg, 'success');
 
   } catch (err) {
-    if (err.name === 'TimeoutError') {
-      showFeedback('Tiempo de espera agotado. El servidor tardó demasiado en responder.', 'error');
-    } else {
-      showFeedback(err.message, 'error');
-    }
+    const msg = err.name === 'TimeoutError'
+      ? 'Request timed out. Server took too long to respond.'
+      : err.message;
+    showFeedback(msg, 'error');
   } finally {
     btn.disabled = false;
     btn.classList.remove('loading');
-    btnText.textContent = 'Indexar documento';
+    btnText.textContent = 'Index Document';
   }
 }
 
-function showFieldError(fieldId, msg) {
-  const field = $(fieldId);
-  if (!field) return;
-  field.classList.add('field-error');
-  let errEl = field.parentElement.querySelector('.field-error-msg');
-  if (!errEl) {
-    errEl = document.createElement('span');
-    errEl.className = 'field-error-msg';
-    field.parentElement.appendChild(errEl);
-  }
-  errEl.textContent = msg;
+function showFieldErr(id, msg) {
+  const f = $(id); if (!f) return;
+  f.classList.add('field-error');
+  let e = f.parentElement.querySelector('.field-error-msg');
+  if (!e) { e = document.createElement('span'); e.className = 'field-error-msg'; f.after(e); }
+  e.textContent = msg;
 }
 
-function clearFieldError(fieldId) {
-  const field = $(fieldId);
-  if (!field) return;
-  field.classList.remove('field-error');
-  const errEl = field.parentElement?.querySelector('.field-error-msg');
-  if (errEl) errEl.remove();
+function clearFieldErr(id) {
+  const f = $(id); if (!f) return;
+  f.classList.remove('field-error');
+  f.parentElement?.querySelector('.field-error-msg')?.remove();
 }
 
 function showFeedback(msg, type) {
   const el = $('ingestFeedback');
   if (!el) return;
+  if (!msg) { el.classList.add('hidden'); return; }
   el.textContent = msg;
-  el.className = `feedback ${type}`;
+  el.className = `feedback-banner ${type}`;
   el.classList.remove('hidden');
-  // Auto-hide successes after 8s, keep errors visible
-  if (type === 'success') {
-    setTimeout(() => { el.className = 'feedback hidden'; }, 8000);
-  }
+  if (type === 'success') setTimeout(() => el.classList.add('hidden'), 8000);
 }
 
 function onContentInput(el) {
   const cc = $('charCount');
   const len = el.value.length;
   if (cc) {
-    cc.textContent = len.toLocaleString('es');
-    cc.classList.toggle('char-count-warn', len > 1_500_000);
-    cc.classList.toggle('char-count-error', len > 2_000_000);
+    cc.textContent = len.toLocaleString() + ' chars';
+    cc.classList.toggle('warn', len > 1_500_000);
+    cc.classList.toggle('over', len > 2_000_000);
   }
-  // Live validation
-  if (len > 0) clearFieldError('docContent');
+  if (len > 0) clearFieldErr('docContent');
 }
 
 function onDocIdInput(el) {
-  if (el.value.length > 0) clearFieldError('docId');
+  if (el.value.length > 0) clearFieldErr('docId');
 }
 
 function addDocToList(id, charLen) {
   const container = $('docsIndexed');
   const list = $('docsList');
   if (!container || !list) return;
-  container.style.display = '';
+  container.classList.remove('hidden');
   const item = document.createElement('div');
   item.className = 'doc-item';
   item.innerHTML = `
-    <svg class="doc-item-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+    <svg class="doc-item-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
     <span class="doc-item-name">${esc(id)}</span>
-    <span class="doc-item-chars">${charLen.toLocaleString('es')} chars</span>
-    <span class="doc-item-time">${ts()}</span>`;
+    <span class="doc-item-meta">${charLen.toLocaleString()} chars · ${ts()}</span>`;
   list.prepend(item);
 }
 
-/* ── FILE UPLOAD ────────────────────────────────────────────── */
+// ── FILE UPLOAD ───────────────────────────────────────
 function onDragOver(e) {
   e.preventDefault();
   $('uploadDrop').classList.add('drag-over');
 }
-
 function onDragLeave() {
   $('uploadDrop').classList.remove('drag-over');
 }
-
 function onDrop(e) {
   e.preventDefault();
   $('uploadDrop').classList.remove('drag-over');
   const file = e.dataTransfer.files[0];
-  if (file) validateAndReadFile(file);
+  if (file) validateFile(file);
 }
-
 function onFileSelect(e) {
   const file = e.target.files[0];
-  if (file) validateAndReadFile(file);
+  if (file) validateFile(file);
 }
 
-const ALLOWED_TYPES = ['text/plain', 'text/markdown', 'application/pdf'];
-const ALLOWED_EXTS  = ['.txt', '.md', '.pdf'];
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
-
-function validateAndReadFile(file) {
+function validateFile(file) {
   const ext = '.' + file.name.split('.').pop().toLowerCase();
-  if (!ALLOWED_EXTS.includes(ext)) {
-    showFeedback(`Tipo de archivo no permitido: ${ext}. Usa .txt, .md o .pdf.`, 'error');
+  if (!['.txt','.md','.pdf'].includes(ext)) {
+    showFeedback(`File type not allowed: ${ext}. Use .txt, .md, or .pdf.`, 'error');
     return;
   }
-  if (file.size > MAX_FILE_SIZE) {
-    showFeedback(`El archivo es demasiado grande (${(file.size/1024/1024).toFixed(1)} MB). Límite: 5 MB.`, 'error');
+  if (file.size > 5 * 1024 * 1024) {
+    showFeedback(`File too large (${(file.size/1024/1024).toFixed(1)} MB). Limit: 5 MB.`, 'error');
     return;
   }
-  if (file.size === 0) {
-    showFeedback('El archivo está vacío.', 'error');
-    return;
-  }
-  readFile(file);
-}
-
-function readFile(file) {
+  if (file.size === 0) { showFeedback('File is empty.', 'error'); return; }
   const reader = new FileReader();
   reader.onload = ev => {
-    const content = ev.target.result;
-    $('docContent').value = content;
+    $('docContent').value = ev.target.result;
     $('docId').value = file.name.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').slice(0, 100);
     onContentInput($('docContent'));
-    showFeedback(`Archivo "${esc(file.name)}" cargado (${(file.size/1024).toFixed(1)} KB). Haz clic en "Indexar documento".`, 'success');
+    showFeedback(`"${esc(file.name)}" loaded (${(file.size/1024).toFixed(1)} KB). Click Index Document.`, 'success');
   };
-  reader.onerror = () => showFeedback('Error al leer el archivo.', 'error');
+  reader.onerror = () => showFeedback('Error reading file.', 'error');
   reader.readAsText(file);
 }
 
-/* ── SEARCH ─────────────────────────────────────────────────── */
+// ── SEARCH ────────────────────────────────────────────
 async function handleSearch() {
+  // ✅ Allow typing during search — only disable the send button
   if (state.isSearching) return;
 
   const input = $('chatQuery');
   const query = input?.value?.trim();
 
-  // Validate query
-  const queryErr = VALIDATION.query(query);
-  if (queryErr) {
-    // Show subtle inline hint instead of blocking
-    input.classList.add('input-shake');
-    setTimeout(() => input.classList.remove('input-shake'), 500);
+  if (!query || query.length < 2) {
+    input?.classList.add('shake');
+    setTimeout(() => input?.classList.remove('shake'), 400);
     return;
   }
 
-  // Warn if search service is down
   if (state.serviceStatus.search === false) {
-    appendSystemMessage('⚠ El servicio de búsqueda no está disponible. Verifica la pestaña System.');
+    appendSystemMsg('⚠ Search service unavailable. Check the System tab.');
     return;
   }
 
   const topK       = parseInt($('topK')?.value || '3', 10);
   const enableEval = $('enableEval')?.checked ?? false;
 
+  // Clear input immediately — don't wait
   input.value = '';
   autoResize(input);
 
+  // Create chat if needed
   if (!state.activeChatId) {
-    const chat = { id: Date.now(), title: query.slice(0, 40), messages: [] };
+    const chat = { id: Date.now(), title: query.slice(0, 42), messages: [] };
     state.chats.unshift(chat);
     state.activeChatId = chat.id;
     renderHistory();
@@ -441,12 +402,12 @@ async function handleSearch() {
 
   showChatArea();
   const userTime = ts();
-  renderUserBubble(query, userTime);
-  saveMessage('user', query, userTime);
+  renderUserBubble(query, userTime, true);
+  saveMsg('user', query, userTime);
 
   const chat = state.chats.find(c => c.id === state.activeChatId);
   if (chat && chat.messages.length <= 1) {
-    chat.title = query.slice(0, 40) + (query.length > 40 ? '…' : '');
+    chat.title = query.slice(0, 42) + (query.length > 42 ? '…' : '');
     renderHistory();
   }
 
@@ -454,7 +415,7 @@ async function handleSearch() {
   $('searchBtn').disabled = true;
   $('streamStatus').classList.remove('hidden');
 
-  const loaderId = appendTypingIndicator();
+  const loaderId = appendTyping();
   const t0 = Date.now();
 
   try {
@@ -465,11 +426,11 @@ async function handleSearch() {
       signal:  AbortSignal.timeout(120_000),
     });
 
-    if (res.status === 401) throw new Error('API Key inválida. Verifica la configuración.');
-    if (res.status === 429) throw new Error('Demasiadas solicitudes. Espera un momento.');
+    if (res.status === 401) throw new Error('Invalid API Key. Check your configuration.');
+    if (res.status === 429) throw new Error('Rate limit reached. Please wait.');
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Error del servidor (${res.status})`);
+      throw new Error(err.detail || `Server error (${res.status})`);
     }
 
     removeEl(loaderId);
@@ -488,13 +449,12 @@ async function handleSearch() {
       scrollToBottom();
     }
 
-    // If response was empty, show hint
     if (!text.trim()) {
-      text = 'No encontré información relevante en los documentos indexados. Intenta subir documentos con contenido relacionado a tu pregunta.';
+      text = 'No relevant information found in the indexed documents. Try uploading documents related to your question.';
       contentEl.textContent = text;
     }
 
-    saveMessage('ai', text, aiTime);
+    saveMsg('ai', text, aiTime);
 
     const latency = Date.now() - t0;
     state.queryCount++;
@@ -504,26 +464,28 @@ async function handleSearch() {
 
   } catch (err) {
     removeEl(loaderId);
-    const errTime = ts();
-    let errMsg = err.message;
-    if (err.name === 'TimeoutError') errMsg = 'La respuesta tardó demasiado. Inténtalo de nuevo.';
-    renderAIBubble(`Error: ${errMsg}`, errTime, true);
+    const aiTime = ts();
+    const errMsg = err.name === 'TimeoutError'
+      ? 'Response took too long. Please try again.'
+      : err.message;
+    renderAIBubble(`Error: ${errMsg}`, aiTime, true, true);
   } finally {
     state.isSearching  = false;
     $('searchBtn').disabled = false;
     $('streamStatus').classList.add('hidden');
+    // ✅ Refocus input after response — user can type next question immediately
+    $('chatQuery')?.focus();
   }
 }
 
-function saveMessage(role, content, time) {
+function saveMsg(role, content, time) {
   const chat = state.chats.find(c => c.id === state.activeChatId);
   if (chat) chat.messages.push({ role, content, time });
 }
 
-function appendSystemMessage(msg) {
-  const box = $('chatBox');
-  if (!box) return;
+function appendSystemMsg(msg) {
   showChatArea();
+  const box = $('chatBox'); if (!box) return;
   const el = document.createElement('div');
   el.className = 'message system-msg';
   el.innerHTML = `<div class="msg-bubble warn-bubble">${esc(msg)}</div>`;
@@ -531,25 +493,25 @@ function appendSystemMessage(msg) {
   scrollToBottom();
 }
 
-/* ── DOM HELPERS ────────────────────────────────────────────── */
-function renderUserBubble(text, time) {
-  const box = $('chatBox');
+// ── DOM HELPERS ───────────────────────────────────────
+function renderUserBubble(text, time, animate = true) {
+  const box = $('chatBox'); if (!box) return;
   const el  = document.createElement('div');
-  el.className = 'message user-msg';
+  el.className = `message user-msg${animate ? '' : ' no-anim'}`;
   el.innerHTML = `
-    <div class="msg-avatar">Tú</div>
+    <div class="msg-avatar">You</div>
     <div class="msg-body">
-      <div class="msg-meta">Tú · ${time}</div>
+      <div class="msg-meta">You · ${time}</div>
       <div class="msg-bubble">${esc(text)}</div>
     </div>`;
   box.appendChild(el);
   scrollToBottom();
 }
 
-function renderAIBubble(text, time, isError = false) {
-  const box = $('chatBox');
+function renderAIBubble(text, time, isError = false, animate = true) {
+  const box = $('chatBox'); if (!box) return;
   const el  = document.createElement('div');
-  el.className = 'message ai-msg';
+  el.className = `message ai-msg${animate ? '' : ' no-anim'}`;
   el.innerHTML = `
     <div class="msg-avatar">VY</div>
     <div class="msg-body">
@@ -560,9 +522,9 @@ function renderAIBubble(text, time, isError = false) {
   scrollToBottom();
 }
 
-function appendTypingIndicator() {
-  const id  = `loader-${Date.now()}`;
-  const box = $('chatBox');
+function appendTyping() {
+  const id  = `ld-${Date.now()}`;
+  const box = $('chatBox'); if (!box) return id;
   const el  = document.createElement('div');
   el.id = id;
   el.className = 'message ai-msg';
@@ -570,9 +532,7 @@ function appendTypingIndicator() {
     <div class="msg-avatar">VY</div>
     <div class="msg-body">
       <div class="msg-meta">Vectoryn · ${ts()}</div>
-      <div class="msg-bubble">
-        <div class="typing-dots"><span></span><span></span><span></span></div>
-      </div>
+      <div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>
     </div>`;
   box.appendChild(el);
   scrollToBottom();
@@ -580,23 +540,19 @@ function appendTypingIndicator() {
 }
 
 function appendAIBubble(time) {
-  const box       = $('chatBox');
-  const wrapper   = document.createElement('div');
+  const box     = $('chatBox');
+  const wrapper = document.createElement('div');
   wrapper.className = 'message ai-msg';
-
-  const contentEl = document.createElement('div');
-  contentEl.className   = 'msg-bubble';
+  const contentEl   = document.createElement('div');
+  contentEl.className = 'msg-bubble';
   contentEl.style.whiteSpace = 'pre-wrap';
-
   const metaEl = document.createElement('div');
-  metaEl.className    = 'msg-meta';
-  metaEl.textContent  = `Vectoryn · ${time}`;
-
+  metaEl.className = 'msg-meta';
+  metaEl.textContent = `Vectoryn · ${time}`;
   const body = document.createElement('div');
   body.className = 'msg-body';
   body.appendChild(metaEl);
   body.appendChild(contentEl);
-
   wrapper.innerHTML = `<div class="msg-avatar">VY</div>`;
   wrapper.appendChild(body);
   box.appendChild(wrapper);
@@ -606,19 +562,22 @@ function appendAIBubble(time) {
 
 function removeEl(id) { $(id)?.remove(); }
 
-/* ── UTILS ──────────────────────────────────────────────────── */
+// ── UTILS ─────────────────────────────────────────────
 function scrollToBottom() {
   const area = $('chatArea');
-  if (area) area.scrollTop = area.scrollHeight;
+  if (area) area.scrollTo({ top: area.scrollHeight, behavior: 'smooth' });
 }
 
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  el.style.height = Math.min(el.scrollHeight, 150) + 'px';
 }
 
 function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSearch(); }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSearch();
+  }
 }
 
 function adjustTopK(delta) {
@@ -639,13 +598,22 @@ function esc(str) {
 }
 
 function ts() {
-  return new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-/* ── INIT ───────────────────────────────────────────────────── */
+// ── INIT ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  // Restore theme
+  const saved = localStorage.getItem('vx-theme') || 'dark';
+  setTheme(saved);
+
+  // Health check
   checkHealth();
   setInterval(checkHealth, 30_000);
-  $('chatQuery')?.focus();
+
+  // Create initial chat
   newChat();
+
+  // Focus input
+  $('chatQuery')?.focus();
 });
