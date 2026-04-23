@@ -169,6 +169,21 @@
           <div class="pane-label" style="margin-top:16px">Indexed this session</div>
           <div id="docsList"></div>
         </div>
+
+        <!-- ── MANAGE DOCUMENTS ── -->
+        <div class="manage-docs-section">
+          <div class="pane-label" style="margin-top:20px">
+            Indexed Documents
+            <button class="btn-refresh-docs" onclick="loadDocuments()" title="Refresh list">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+          </div>
+          <div id="manageDocsList" class="manage-docs-list">
+            <div class="manage-docs-empty">
+              <span>Click refresh to load indexed documents</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- ── STATUS TAB ── -->
