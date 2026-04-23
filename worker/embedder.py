@@ -180,8 +180,8 @@ consumer = Consumer({
     "group.id":                  KAFKA_GROUP_ID,
     "auto.offset.reset":         "earliest",
     "enable.auto.commit":        False,
-    "fetch.max.bytes":           524_288,   # 512KB — menos buffer en RAM
-    "max.partition.fetch.bytes": 262_144,   # 256KB por partición
+    "fetch.max.bytes":           1_048_576,  # 1MB — debe ser >= message.max.bytes
+    "max.partition.fetch.bytes": 524_288,   # 512KB por partición
 })
 consumer.subscribe([KAFKA_TOPIC_IN])
 
