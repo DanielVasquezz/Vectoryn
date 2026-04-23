@@ -406,28 +406,47 @@ if not _TESTING:
     logger.info("Worker started — consuming messages...")
 
     while _running:
-        msg = consumer.poll(0.1)
+        try:
+            msg = consumer.poll(0.1)
 
-        if msg is None:
-            if buffer and (time.time() - last_flush) * 1000 > BATCH_TIMEOUT_MS:
-                process_batch(buffer)
-                buffer     = []
-                last_flush = time.time()
-            continue
+            if msg is None:
+                if buffer and (time.time() - last_flush) * 1000 > BATCH_TIMEOUT_MS:
+                    try:
+                        process_batch(buffer)
+                    except Exception as _be:
+                        logger.error(f"BATCH_ERROR (flush): {_be}")
+                    finally:
+                        buffer     = []
+                        last_flush = time.time()
+                continue
 
-        if msg.error():
-            logger.warning(f"KAFKA_MSG_ERROR {msg.error()}")
-            continue
+            if msg.error():
+                logger.warning(f"KAFKA_MSG_ERROR {msg.error()}")
+                continue
 
-        buffer.append(msg)
+            buffer.append(msg)
 
-        if len(buffer) >= BATCH_SIZE:
-            process_batch(buffer)
+            if len(buffer) >= BATCH_SIZE:
+                try:
+                    process_batch(buffer)
+                except Exception as _be:
+                    logger.error(f"BATCH_ERROR (size): {_be}")
+                finally:
+                    buffer     = []
+                    last_flush = time.time()
+
+        except Exception as _le:
+            # Captura cualquier error inesperado del loop -> evita crash del proceso
+            logger.error(f"LOOP_ERROR (recovered): {_le}")
             buffer     = []
             last_flush = time.time()
+            time.sleep(1)
 
     if buffer:
-        process_batch(buffer)
+        try:
+            process_batch(buffer)
+        except Exception as _e:
+            logger.error(f"FINAL_BATCH_ERROR: {_e}")
 
     consumer.close()
     dlq_producer.flush(10)
