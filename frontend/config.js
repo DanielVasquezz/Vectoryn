@@ -5,6 +5,6 @@
 window.VECTORYN_CONFIG = {
   GATEWAY_URL: window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:8080'
-    : 'https://vectoryn-gateway.onrender.com',
-  API_KEY: 'your_secret_key_here',
+    : 'https://vectoryn-gateway-t5s7.onrender.com',
+  API_KEY: '1e46805fb3cda729',
 };
