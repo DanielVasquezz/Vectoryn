@@ -1,5 +1,5 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v5.1 (RAM-Optimized, PyTorch CPU)
+worker/embedder.py — Vectoryn Embedding Worker v5.2 (RAM-Optimized, PyTorch CPU)
 ==================================================================================
 
 OPTIMIZACIONES RAM vs v4.0:
@@ -7,11 +7,17 @@ OPTIMIZACIONES RAM vs v4.0:
 1. torch.set_num_threads(1)  → PyTorch no lanza threads extra (~20MB menos)
 2. model.half() NO aplica en CPU — se usa float32 con inference_mode
 3. BATCH_SIZE=1 por defecto  → mínimo pico RAM por ciclo
-4. MAX_DOC_CHARS=50_000      → trunca docs grandes antes de chunking
+4. MAX_DOC_CHARS=15_000      → trunca docs grandes antes de chunking (~30 chunks máx)
 5. Prometheus desactivado por defecto → ~15MB menos
 6. GC explícito tras cada embed + borrado de tensores
 7. Kafka fetch buffers reducidos → menos RAM de red
 8. torch.set_grad_enabled(False) global → nunca se acumula grafo de gradientes
+
+CAMBIOS v5.2:
+-------------
+- MAX_DOC_CHARS bajado de 50K → 15K (elimina DOC_TRUNCATED warnings de docs grandes)
+- Chunks embedean UNO A UNO en vez de todos juntos → sin tensor gigante → sin OOM
+- Error en un chunk no mata el documento completo (continúa con el siguiente)
 """
 from __future__ import annotations
 
@@ -62,7 +68,7 @@ EMBEDDING_DIM      = 384
 BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "1"))
 BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
 HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
-MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "50000"))
+MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "15000"))  # 15K → ~30 chunks máx → sin OOM
 ENABLE_PROMETHEUS  = os.getenv("ENABLE_PROMETHEUS", "false").lower() == "true"
 
 _TESTING = os.getenv("TESTING") == "true"
@@ -285,67 +291,71 @@ def process_batch(messages: list):
         except Exception:
             continue
 
-    all_chunks: list[str] = []
-    meta:       list[tuple] = []
+    total_chunks_done = 0
 
     for p in payloads:
+        doc_id = p.get("doc_id", "unknown")
         try:
             content = p.get("content", "")
             if len(content) > MAX_DOC_CHARS:
                 logger.warning(
-                    f"DOC_TRUNCATED doc_id={p.get('doc_id')} "
+                    f"DOC_TRUNCATED doc_id={doc_id} "
                     f"original_chars={len(content)} limit={MAX_DOC_CHARS}"
                 )
                 content = content[:MAX_DOC_CHARS]
 
             chunks = chunker.chunk_text_list(content)
             CHUNKS_CREATED.inc(len(chunks))
+
+            # ── Embedear y subir chunk por chunk — evita tensor gigante en RAM ──
             for c in chunks:
-                all_chunks.append(c["content"])
-                meta.append((p.get("doc_id"), c["chunk_index"], c["total_chunks"]))
+                chunk_text = c["content"]
+                chunk_idx  = c["chunk_index"]
+                chunk_tot  = c["total_chunks"]
+
+                try:
+                    # embed_dense_batch acepta lista; pasamos lista de 1 elemento
+                    vec = embed_dense_batch([chunk_text])[0]
+                except Exception as embed_err:
+                    logger.error(f"EMBED_ERROR doc_id={doc_id} chunk={chunk_idx}: {embed_err}")
+                    send_to_dlq(p, embed_err)
+                    continue  # siguiente chunk; no mata el doc entero
+
+                point = PointStruct(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{chunk_idx}")),
+                    vector=vec,
+                    payload={
+                        "doc_id":       doc_id,
+                        "content":      chunk_text,
+                        "chunk_index":  chunk_idx,
+                        "total_chunks": chunk_tot,
+                        "ts":           time.time(),
+                    },
+                )
+
+                try:
+                    qdrant.upsert(COLLECTION_NAME, points=[point])
+                    total_chunks_done += 1
+                except Exception as upsert_err:
+                    logger.error(f"UPSERT_ERROR doc_id={doc_id} chunk={chunk_idx}: {upsert_err}")
+                    send_to_dlq(p, upsert_err)
+
+                del vec, point
+                gc.collect()  # libera RAM entre chunks
 
         except Exception as e:
+            logger.error(f"DOC_ERROR doc_id={doc_id}: {e}")
             send_to_dlq(p, e)
 
-    if not all_chunks:
-        return
-
     try:
-        dense = embed_dense_batch(all_chunks)
-    except Exception as e:
-        logger.error(f"EMBED_ERROR: {e}")
-        for p in payloads:
-            send_to_dlq(p, e)
-        return
-
-    points: list[PointStruct] = []
-    for i, text in enumerate(all_chunks):
-        doc_id, idx, total = meta[i]
-        points.append(PointStruct(
-            id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{idx}")),
-            vector=dense[i],
-            payload={
-                "doc_id":       doc_id,
-                "content":      text,
-                "chunk_index":  idx,
-                "total_chunks": total,
-                "ts":           time.time(),
-            },
-        ))
-
-    del all_chunks, dense
-
-    try:
-        qdrant.upsert(COLLECTION_NAME, points=points)
         DOCS_PROCESSED.inc(len(payloads))
         elapsed = time.time() - start_time
         consumer.commit()
-        logger.info(f"BATCH_DONE docs={len(payloads)} chunks={len(points)} elapsed={elapsed:.2f}s")
+        logger.info(f"BATCH_DONE docs={len(payloads)} chunks={total_chunks_done} elapsed={elapsed:.2f}s")
     except Exception as e:
-        for p in payloads:
-            send_to_dlq(p, e)
+        logger.error(f"COMMIT_ERROR: {e}")
     finally:
-        del points, payloads
+        del payloads
         gc.collect()
 
 
