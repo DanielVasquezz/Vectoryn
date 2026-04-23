@@ -82,7 +82,13 @@ class SemanticChunker:
             if not para:
                 continue
 
-            para_tokens = tokenizer.encode(para, add_special_tokens=False)
+            # truncation=True evita el warning "Token indices sequence length > 512"
+            para_tokens = tokenizer.encode(
+                para,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=4096,
+            )
             combined    = carry_tokens + para_tokens
 
             if len(combined) <= self.chunk_size:
