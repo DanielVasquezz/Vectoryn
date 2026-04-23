@@ -34,7 +34,6 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import certifi
-import numpy as np
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -84,7 +83,7 @@ chunker    = None
 
 # ── Prometheus (opcional) ──────────────────────────────────────────────────────
 if ENABLE_PROMETHEUS:
-    from prometheus_client import Counter, Gauge, Histogram, start_http_server
+    from prometheus_client import Counter, start_http_server
     DOCS_PROCESSED = Counter("worker_documents_processed_total", "Docs processed")
     DOCS_FAILED    = Counter("worker_documents_failed_total",    "Docs failed")
     CHUNKS_CREATED = Counter("worker_chunks_created_total",      "Chunks created")
