@@ -202,7 +202,8 @@ function useSuggestion(btn) {
 async function handleIngest() {
   const contentEl = $('docContent');
   const docIdEl   = $('docId');
-  const content   = contentEl?.value?.trim();
+  // Use _pendingContent (from file upload) if the textarea is empty
+  const content   = contentEl?.value?.trim() || _pendingContent?.trim();
   const docId     = docIdEl?.value?.trim();
   const btn       = $('ingestBtn');
   const btnText   = $('ingestBtnText');
@@ -252,6 +253,8 @@ async function handleIngest() {
     $('stat-ingested').textContent = state.ingestCount;
     addDocToList(data.doc_id || payload.id, content.length);
     contentEl.value = '';
+    contentEl.placeholder = 'Paste your document content here, or upload a file above…';
+    _pendingContent = '';
     docIdEl.value   = '';
     onContentInput(contentEl);
 
@@ -298,7 +301,9 @@ function showFeedback(msg, type) {
 
 function onContentInput(el) {
   const cc = $('charCount');
-  const len = el.value.length;
+  // If user typed something, clear pending file content
+  if (el.value.trim()) _pendingContent = '';
+  const len = (_pendingContent || el.value).length;
   if (cc) {
     cc.textContent = len.toLocaleString() + ' chars';
     cc.classList.toggle('warn', len > 1_500_000);
@@ -344,6 +349,9 @@ function onFileSelect(e) {
   if (file) validateFile(file);
 }
 
+// Hidden content buffer — stores extracted text without polluting the UI
+let _pendingContent = '';
+
 function validateFile(file) {
   const ext = '.' + file.name.split('.').pop().toLowerCase();
   if (!['.txt','.md','.pdf'].includes(ext)) {
@@ -355,15 +363,84 @@ function validateFile(file) {
     return;
   }
   if (file.size === 0) { showFeedback('File is empty.', 'error'); return; }
-  const reader = new FileReader();
-  reader.onload = ev => {
-    $('docContent').value = ev.target.result;
-    $('docId').value = file.name.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').slice(0, 100);
-    onContentInput($('docContent'));
-    showFeedback(`"${esc(file.name)}" loaded (${(file.size/1024).toFixed(1)} KB). Click Index Document.`, 'success');
-  };
-  reader.onerror = () => showFeedback('Error reading file.', 'error');
-  reader.readAsText(file);
+
+  const docIdEl = $('docId');
+  const baseName = file.name.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').slice(0, 100);
+  if (docIdEl) docIdEl.value = baseName;
+
+  if (ext === '.pdf') {
+    _loadPDF(file);
+  } else {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      _setContent(ev.target.result, file.name, file.size);
+    };
+    reader.onerror = () => showFeedback('Error reading file.', 'error');
+    reader.readAsText(file);
+  }
+}
+
+function _setContent(text, fileName, fileSize) {
+  _pendingContent = text;
+
+  // Show a clean placeholder — never dump raw content into the textarea
+  const contentEl = $('docContent');
+  if (contentEl) {
+    contentEl.value = '';                   // keep textarea empty
+    contentEl.placeholder = `✓ "${fileName}" ready (${(fileSize/1024).toFixed(1)} KB, ${text.length.toLocaleString()} chars extracted). Click Index Document.`;
+  }
+
+  // Update char counter using actual extracted length
+  const cc = $('charCount');
+  if (cc) {
+    cc.textContent = text.length.toLocaleString() + ' chars';
+    cc.classList.toggle('warn', text.length > 1_500_000);
+    cc.classList.toggle('over', text.length > 2_000_000);
+  }
+
+  showFeedback(`"${esc(fileName)}" loaded — ${text.length.toLocaleString()} chars extracted. Click Index Document.`, 'success');
+}
+
+async function _loadPDF(file) {
+  showFeedback('Extracting text from PDF…', '');
+
+  // Load PDF.js from CDN if not already present
+  if (!window.pdfjsLib) {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pages = [];
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const tokenized = await page.getTextContent();
+      const pageText = tokenized.items.map(item => item.str).join(' ');
+      pages.push(pageText);
+    }
+
+    const fullText = pages.join('\n\n').trim();
+
+    if (!fullText) {
+      showFeedback('PDF appears to be scanned or image-only — no text could be extracted.', 'error');
+      return;
+    }
+
+    _setContent(fullText, file.name, file.size);
+
+  } catch (err) {
+    showFeedback('Failed to read PDF: ' + err.message, 'error');
+  }
 }
 
 // ── SEARCH ────────────────────────────────────────────
