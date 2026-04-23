@@ -117,3 +117,35 @@ async def search(req: SearchRequest, x_api_key: Optional[str] = Header(None)):
                 yield f"Error connecting to search service: {e}".encode()
 
     return StreamingResponse(stream(), media_type="text/plain")
+
+
+@app.get("/documents")
+async def list_documents(x_api_key: Optional[str] = Header(None)):
+    require_auth(x_api_key)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            res = await client.get(
+                f"{SEARCH_URL}/documents",
+                headers={"X-API-Key": API_KEY},
+            )
+            if res.status_code >= 400:
+                raise HTTPException(status_code=res.status_code, detail=res.text)
+            return res.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"Search service unavailable: {e}")
+
+
+@app.delete("/document/{doc_id}")
+async def delete_document(doc_id: str, x_api_key: Optional[str] = Header(None)):
+    require_auth(x_api_key)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            res = await client.delete(
+                f"{SEARCH_URL}/document/{doc_id}",
+                headers={"X-API-Key": API_KEY},
+            )
+            if res.status_code >= 400:
+                raise HTTPException(status_code=res.status_code, detail=res.text)
+            return res.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"Search service unavailable: {e}")
