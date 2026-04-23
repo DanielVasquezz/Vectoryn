@@ -1,6 +1,9 @@
-# torch: CPU-only build. En Dockerfile se instala desde el PyTorch index
-# (ahorra ~2.5GB vs CUDA). En CI se instala desde PyPI.
-torch>=2.2.0
+# ── v5.0: PyTorch ELIMINADO — usamos ONNX Runtime (~180MB menos RAM) ──────────
+# torch: REMOVIDO — sentence-transformers con backend='onnx' no lo necesita
+sentence-transformers>=2.7.0
+onnxruntime>=1.17.0
+optimum[onnxruntime]>=1.19.0
+
 confluent-kafka==2.3.0
 qdrant-client==1.10.1
 transformers==4.40.0
@@ -8,14 +11,13 @@ python-dotenv
 certifi
 numpy<2.0.0
 
-# fastembed: SOLO se importa si ENABLE_SPARSE=true
-# Mantener en requirements para que esté disponible, pero no se carga en startup
-fastembed>=0.2.0
+# fastembed: SOLO si ENABLE_SPARSE=true (no se importa en startup)
+# fastembed>=0.2.0
 
-# ── Observability ────────────────────────────────────────────
+# Prometheus: SOLO si ENABLE_PROMETHEUS=true
 prometheus-client>=0.20.0
 
-# ── Testing ──────────────────────────────────────────────────
+# ── Testing ──────────────────────────────────────────────────────────────────
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pytest-cov>=4.1.0
