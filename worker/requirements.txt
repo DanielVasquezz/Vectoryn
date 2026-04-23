@@ -1,8 +1,6 @@
-# ── v5.0: PyTorch ELIMINADO — usamos ONNX Runtime (~180MB menos RAM) ──────────
-# torch: REMOVIDO — sentence-transformers con backend='onnx' no lo necesita
-sentence-transformers>=2.7.0
-onnxruntime>=1.17.0
-optimum[onnxruntime]>=1.19.0
+# torch: CPU-only. Se instala desde PyTorch index en el Dockerfile
+# ANTES que este requirements.txt, así pip no lo sobreescribe con CUDA.
+torch>=2.2.0
 
 confluent-kafka==2.3.0
 qdrant-client==1.10.1
@@ -11,10 +9,7 @@ python-dotenv
 certifi
 numpy<2.0.0
 
-# fastembed: SOLO si ENABLE_SPARSE=true (no se importa en startup)
-# fastembed>=0.2.0
-
-# Prometheus: SOLO si ENABLE_PROMETHEUS=true
+# Prometheus: solo si ENABLE_PROMETHEUS=true (import condicional en código)
 prometheus-client>=0.20.0
 
 # ── Testing ──────────────────────────────────────────────────────────────────
