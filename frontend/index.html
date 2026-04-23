@@ -1,301 +1,372 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vectoryn</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Vectoryn — Semantic Search</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-top">
-      <div class="logo">
-        <div class="logo-mark">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M9 1L16 5V13L9 17L2 13V5L9 1Z" fill="white" fill-opacity="0.9"/>
-            <path d="M9 5L13 7.5V12.5L9 15L5 12.5V7.5L9 5Z" fill="black" fill-opacity="0.35"/>
-          </svg>
+  <!-- ── THEME SWITCHER ── -->
+  <div class="theme-dock" id="themeDock">
+    <button class="theme-toggle-btn" onclick="toggleThemePicker()" aria-label="Change theme" title="Change theme">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+    </button>
+    <div class="theme-picker hidden" id="themePicker">
+      <button class="swatch" data-theme="dark" onclick="setTheme('dark')" title="Dark"></button>
+      <button class="swatch" data-theme="light" onclick="setTheme('light')" title="Light"></button>
+      <button class="swatch" data-theme="blue" onclick="setTheme('blue')" title="Ocean"></button>
+      <button class="swatch" data-theme="rose" onclick="setTheme('rose')" title="Rose"></button>
+      <button class="swatch" data-theme="green" onclick="setTheme('green')" title="Forest"></button>
+      <button class="swatch" data-theme="amber" onclick="setTheme('amber')" title="Amber"></button>
+    </div>
+  </div>
+
+  <!-- ── MOBILE OVERLAY ── -->
+  <div class="overlay hidden" id="overlay" onclick="closeSidebar()"></div>
+
+  <!-- ── MOBILE HEADER ── -->
+  <header class="mobile-header">
+    <button class="mob-menu-btn" onclick="openSidebar()" aria-label="Open menu">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="mob-logo">
+      <div class="logo-hex">
+        <svg width="20" height="20" viewBox="0 0 18 18" fill="none"><path d="M9 1L16 5V13L9 17L2 13V5L9 1Z" fill="var(--accent)"/><path d="M9 5L13 7.5V12.5L9 15L5 12.5V7.5L9 5Z" fill="var(--bg)" fill-opacity="0.4"/></svg>
+      </div>
+      <span>Vectoryn</span>
+    </div>
+    <div class="mob-status-dot" id="mobStatusDot"></div>
+  </header>
+
+  <div class="app-shell">
+
+    <!-- ══════════════════════════════════════════
+         SIDEBAR
+    ══════════════════════════════════════════ -->
+    <aside class="sidebar" id="sidebar">
+
+      <div class="sidebar-header">
+        <div class="logo">
+          <div class="logo-hex">
+            <svg width="22" height="22" viewBox="0 0 18 18" fill="none"><path d="M9 1L16 5V13L9 17L2 13V5L9 1Z" fill="var(--accent)"/><path d="M9 5L13 7.5V12.5L9 15L5 12.5V7.5L9 5Z" fill="var(--bg)" fill-opacity="0.4"/></svg>
+          </div>
+          <div class="logo-text">
+            <span class="logo-name">Vectoryn</span>
+            <span class="logo-tag">Semantic Search</span>
+          </div>
         </div>
-        <span class="logo-name">Vectoryn</span>
+        <button class="sidebar-close" onclick="closeSidebar()" aria-label="Close sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
 
-      <nav class="nav-tabs">
-        <button class="nav-tab active" data-tab="chat" onclick="switchTab('chat', this)">
+      <!-- Nav Tabs -->
+      <div class="nav-pills">
+        <button class="pill active" data-tab="chat" onclick="switchTab('chat',this)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           Chat
         </button>
-        <button class="nav-tab" data-tab="upload" onclick="switchTab('upload', this)">
+        <button class="pill" data-tab="upload" onclick="switchTab('upload',this)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
           Upload
         </button>
-        <button class="nav-tab" data-tab="status" onclick="switchTab('status', this)">
+        <button class="pill" data-tab="status" onclick="switchTab('status',this)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
           System
         </button>
-      </nav>
-    </div>
-
-    <div class="sidebar-section" id="tab-chat">
-      <div class="section-label">Conversations</div>
-      <div class="history-list" id="historyList">
-        <div class="history-empty">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <span>No conversations yet</span>
-        </div>
-      </div>
-      <button class="btn-new-chat" onclick="newChat()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New conversation
-      </button>
-    </div>
-
-    <div class="sidebar-section hidden" id="tab-upload">
-      <div class="section-label">Add Document</div>
-
-      <div class="upload-drop" id="uploadDrop" onclick="document.getElementById('fileInput').click()" ondragover="onDragOver(event)" ondrop="onDrop(event)">
-        <input type="file" id="fileInput" accept=".txt,.md,.pdf" style="display:none" onchange="onFileSelect(event)" />
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
-        <p>Drag a file here</p>
-        <span>or click to select</span>
-        <div class="upload-types">.txt · .md · .pdf</div>
       </div>
 
-      <div id="kafkaWarning" class="kafka-warning hidden">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        <span>El servicio de ingestion no está disponible. Es posible que Kafka no esté conectado. Revisa la pestaña <strong>System</strong> y verifica las variables de entorno <code>KAFKA_BOOTSTRAP_SERVERS</code>.</span>
-      </div>
-      <div class="divider-or"><span>or write directly</span></div>
-
-      <div class="field-group">
-        <label class="field-label">Document Title</label>
-        <input id="docId" type="text" class="field-input" oninput="onDocIdInput(this)" placeholder="e.g., product-manual-2024" />
-      </div>
-      <div class="field-group">
-        <label class="field-label">
-          Content
-          <span id="charCount" class="char-count">0</span>
-        </label>
-        <textarea id="docContent" class="field-textarea" placeholder="Paste your document text here…" oninput="onContentInput(this)"></textarea>
-      </div>
-
-      <button id="ingestBtn" class="btn-primary" onclick="handleIngest()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
-        <span id="ingestBtnText">Index Document</span>
-      </button>
-
-      <div id="ingestFeedback" class="feedback hidden"></div>
-
-      <div class="docs-indexed" id="docsIndexed" style="display:none">
-        <div class="section-label" style="margin-top:20px">Indexed this session</div>
-        <div id="docsList"></div>
-      </div>
-    </div>
-
-    <div class="sidebar-section hidden" id="tab-status">
-      <div class="section-label">Services</div>
-      <div class="services-grid">
-        <div class="service-item" id="svc-gateway">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Gateway</span>
-            <span class="svc-port">:8080</span>
-            <span class="svc-detail" id="svc-gateway-detail">checking…</span>
+      <!-- ── CHAT TAB ── -->
+      <div class="tab-pane active" id="tab-chat">
+        <div class="pane-label">Conversations</div>
+        <div class="history-list" id="historyList">
+          <div class="history-empty">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".3"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <p>No conversations yet</p>
+            <span>Start by asking a question</span>
           </div>
         </div>
-        <div class="service-item" id="svc-ingestion">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Ingestion</span>
-            <span class="svc-port">:8000</span>
-            <span class="svc-detail" id="svc-ingestion-detail">checking…</span>
-          </div>
-        </div>
-        <div class="service-item" id="svc-search">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Search</span>
-            <span class="svc-port">:8001</span>
-            <span class="svc-detail" id="svc-search-detail">checking…</span>
-          </div>
-        </div>
-        <div class="service-item" id="svc-qdrant">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Qdrant</span>
-            <span class="svc-port">:6333</span>
-            <span class="svc-detail" id="svc-qdrant-detail">checking…</span>
-          </div>
-        </div>
-        <div class="service-item" id="svc-kafka">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Kafka</span>
-            <span class="svc-port">:9092</span>
-            <span class="svc-detail" id="svc-kafka-detail">checking…</span>
-          </div>
-        </div>
-        <div class="service-item" id="svc-redis">
-          <div class="svc-dot"></div>
-          <div class="svc-info">
-            <span class="svc-name">Redis</span>
-            <span class="svc-port">:6379</span>
-            <span class="svc-detail" id="svc-redis-detail">checking…</span>
-          </div>
-        </div>
-      </div>
-
-      <button class="btn-refresh" onclick="checkHealth()">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        Refresh
-      </button>
-
-      <div class="section-label" style="margin-top:20px">Session Metrics</div>
-      <div class="metrics-grid">
-        <div class="metric-card">
-          <span class="metric-n" id="stat-queries">0</span>
-          <span class="metric-l">Queries</span>
-        </div>
-        <div class="metric-card">
-          <span class="metric-n" id="stat-ingested">0</span>
-          <span class="metric-l">Indexed</span>
-        </div>
-        <div class="metric-card">
-          <span class="metric-n" id="stat-latency">—</span>
-          <span class="metric-l">Avg ms</span>
-        </div>
-        <div class="metric-card">
-          <span class="metric-n" id="stat-cache">0%</span>
-          <span class="metric-l">Cache hits</span>
-        </div>
-      </div>
-
-      <div class="section-label" style="margin-top:20px">Configuration</div>
-      <div class="config-row">
-        <span>Results (Top-K)</span>
-        <div class="topk-ctrl">
-          <button onclick="adjustTopK(-1)">−</button>
-          <span id="topKDisplay">3</span>
-          <input type="hidden" id="topK" value="3" />
-          <button onclick="adjustTopK(1)">+</button>
-        </div>
-      </div>
-      <div class="config-row">
-        <span>RAGAS Evaluation</span>
-        <label class="toggle">
-          <input type="checkbox" id="enableEval" />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </label>
-      </div>
-
-      <div class="section-label" style="margin-top:20px">Tools</div>
-      <div class="tools-list">
-        <a href="http://localhost:16686" target="_blank" class="tool-link">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          Jaeger — Distributed Traces
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto"><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </a>
-        <a href="http://localhost:3001" target="_blank" class="tool-link">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-          Grafana — Metrics
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto"><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </a>
-        <a href="http://localhost:9090" target="_blank" class="tool-link">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-          Prometheus — Logs
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto"><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </a>
-      </div>
-    </div>
-
-    <div class="sidebar-bottom">
-      <div class="system-badge" id="systemBadge">
-        <div class="badge-dot"></div>
-        <span>Checking status…</span>
-      </div>
-    </div>
-  </aside>
-
-  <main class="main">
-
-    <div class="welcome" id="welcomeScreen">
-      <div class="welcome-inner">
-        <div class="welcome-logo">
-          <div class="welcome-mark">
-            <svg width="32" height="32" viewBox="0 0 18 18" fill="none">
-              <path d="M9 1L16 5V13L9 17L2 13V5L9 1Z" fill="white" fill-opacity="0.9"/>
-              <path d="M9 5L13 7.5V12.5L9 15L5 12.5V7.5L9 5Z" fill="black" fill-opacity="0.35"/>
-            </svg>
-          </div>
-        </div>
-        <h1 class="welcome-title">What do you want to know?</h1>
-        <p class="welcome-sub">Ask questions about your documents. Vectoryn searches, analyzes, and answers instantly.</p>
-
-        <div class="welcome-steps">
-          <div class="step">
-            <div class="step-num">1</div>
-            <div class="step-text">
-              <strong>Upload documents</strong>
-              <span>Use the "Upload" tab in the sidebar menu</span>
-            </div>
-          </div>
-          <div class="step">
-            <div class="step-num">2</div>
-            <div class="step-text">
-              <strong>Wait a few seconds</strong>
-              <span>Vectoryn automatically analyzes and indexes the content</span>
-            </div>
-          </div>
-          <div class="step">
-            <div class="step-num">3</div>
-            <div class="step-text">
-              <strong>Ask anything</strong>
-              <span>Use natural language, just like talking to a person</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="welcome-suggestions">
-          <button class="suggestion" onclick="useSuggestion(this)">What is the main point of this document?</button>
-          <button class="suggestion" onclick="useSuggestion(this)">Summarize key points in 3 paragraphs</button>
-          <button class="suggestion" onclick="useSuggestion(this)">What information is available about pricing?</button>
-          <button class="suggestion" onclick="useSuggestion(this)">Are there any dates or deadlines mentioned?</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="chat-area hidden" id="chatArea">
-      <div class="messages" id="chatBox"></div>
-    </div>
-
-    <div class="input-bar">
-      <div class="input-wrap" id="inputWrap">
-        <textarea
-          id="chatQuery"
-          class="query-input"
-          placeholder="Ask something about your documents…"
-          rows="1"
-          onkeydown="handleKey(event)"
-          oninput="autoResize(this)"
-        ></textarea>
-        <button id="searchBtn" class="send-btn" onclick="handleSearch()">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
+        <button class="btn-new-chat" onclick="newChat()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New conversation
         </button>
       </div>
-      <div class="input-meta">
-        <span id="streamStatus" class="stream-status hidden">
-          <span class="pulse-dot"></span>Generating response…
-        </span>
-        <span class="input-hint">Enter to send · Shift+Enter for new line</span>
-      </div>
-    </div>
 
-  </main>
+      <!-- ── UPLOAD TAB ── -->
+      <div class="tab-pane hidden" id="tab-upload">
+        <div class="pane-label">Add Document</div>
+
+        <div class="how-it-works">
+          <div class="how-step">
+            <div class="how-num">1</div>
+            <div>
+              <strong>Upload or paste</strong>
+              <span>Add any .txt, .md, or .pdf file</span>
+            </div>
+          </div>
+          <div class="how-step">
+            <div class="how-num">2</div>
+            <div>
+              <strong>Auto-indexed in ~5s</strong>
+              <span>Vectoryn generates embeddings</span>
+            </div>
+          </div>
+          <div class="how-step">
+            <div class="how-num">3</div>
+            <div>
+              <strong>Ask anything</strong>
+              <span>Search by meaning, not keywords</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="drop-zone" id="uploadDrop"
+             onclick="document.getElementById('fileInput').click()"
+             ondragover="onDragOver(event)"
+             ondragleave="onDragLeave()"
+             ondrop="onDrop(event)">
+          <input type="file" id="fileInput" accept=".txt,.md,.pdf" style="display:none" onchange="onFileSelect(event)" />
+          <div class="drop-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+          </div>
+          <p>Drop file here or <span class="drop-link">browse</span></p>
+          <div class="drop-types">.txt · .md · .pdf · max 5MB</div>
+        </div>
+
+        <div id="kafkaWarning" class="alert-banner hidden">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Ingestion service unavailable. Check <strong>System</strong> tab.
+        </div>
+
+        <div class="or-divider"><span>or paste text</span></div>
+
+        <div class="field-group">
+          <label class="field-label">Document Title <span class="optional">optional</span></label>
+          <input id="docId" type="text" class="field-input" oninput="onDocIdInput(this)" placeholder="e.g., product-manual-v2" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">
+            Content
+            <span id="charCount" class="char-count">0 chars</span>
+          </label>
+          <textarea id="docContent" class="field-textarea" placeholder="Paste your document content here…" oninput="onContentInput(this)"></textarea>
+        </div>
+
+        <button id="ingestBtn" class="btn-primary" onclick="handleIngest()">
+          <span class="btn-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+          </span>
+          <span id="ingestBtnText">Index Document</span>
+        </button>
+
+        <div id="ingestFeedback" class="feedback-banner hidden"></div>
+
+        <div id="docsIndexed" class="docs-indexed hidden">
+          <div class="pane-label" style="margin-top:16px">Indexed this session</div>
+          <div id="docsList"></div>
+        </div>
+      </div>
+
+      <!-- ── STATUS TAB ── -->
+      <div class="tab-pane hidden" id="tab-status">
+        <div class="pane-label">Services</div>
+        <div class="services-grid">
+          <div class="svc-card" id="svc-gateway">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Gateway</span>
+              <span class="svc-port">:8080</span>
+            </div>
+            <span class="svc-badge" id="svc-gateway-badge">—</span>
+          </div>
+          <div class="svc-card" id="svc-ingestion">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Ingestion</span>
+              <span class="svc-port">:8000</span>
+            </div>
+            <span class="svc-badge" id="svc-ingestion-badge">—</span>
+          </div>
+          <div class="svc-card" id="svc-search">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Search</span>
+              <span class="svc-port">:8001</span>
+            </div>
+            <span class="svc-badge" id="svc-search-badge">—</span>
+          </div>
+          <div class="svc-card" id="svc-qdrant">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Qdrant</span>
+              <span class="svc-port">:6333</span>
+            </div>
+            <span class="svc-badge" id="svc-qdrant-badge">—</span>
+          </div>
+          <div class="svc-card" id="svc-kafka">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Kafka</span>
+              <span class="svc-port">:9092</span>
+            </div>
+            <span class="svc-badge" id="svc-kafka-badge">—</span>
+          </div>
+          <div class="svc-card" id="svc-redis">
+            <div class="svc-indicator"></div>
+            <div class="svc-info">
+              <span class="svc-name">Redis</span>
+              <span class="svc-port">:6379</span>
+            </div>
+            <span class="svc-badge" id="svc-redis-badge">—</span>
+          </div>
+        </div>
+
+        <button class="btn-refresh" onclick="checkHealth()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" id="refreshIcon"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh status
+        </button>
+
+        <div class="pane-label" style="margin-top:20px">Metrics</div>
+        <div class="metrics-row">
+          <div class="metric-tile">
+            <div class="metric-val" id="stat-queries">0</div>
+            <div class="metric-lbl">Queries</div>
+          </div>
+          <div class="metric-tile">
+            <div class="metric-val" id="stat-ingested">0</div>
+            <div class="metric-lbl">Indexed</div>
+          </div>
+          <div class="metric-tile">
+            <div class="metric-val" id="stat-latency">—</div>
+            <div class="metric-lbl">Avg ms</div>
+          </div>
+          <div class="metric-tile">
+            <div class="metric-val" id="stat-cache">0%</div>
+            <div class="metric-lbl">Cache</div>
+          </div>
+        </div>
+
+        <div class="pane-label" style="margin-top:20px">Configuration</div>
+        <div class="config-row">
+          <span>Results (Top-K)</span>
+          <div class="topk-ctrl">
+            <button onclick="adjustTopK(-1)">−</button>
+            <span id="topKDisplay">3</span>
+            <input type="hidden" id="topK" value="3" />
+            <button onclick="adjustTopK(1)">+</button>
+          </div>
+        </div>
+        <div class="config-row">
+          <span>RAGAS Evaluation</span>
+          <label class="toggle">
+            <input type="checkbox" id="enableEval" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Sidebar Footer -->
+      <div class="sidebar-footer">
+        <div class="sys-badge" id="systemBadge">
+          <div class="sys-dot"></div>
+          <span>Checking…</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ══════════════════════════════════════════
+         MAIN AREA
+    ══════════════════════════════════════════ -->
+    <main class="main">
+
+      <!-- Welcome Screen -->
+      <div class="welcome" id="welcomeScreen">
+        <div class="welcome-inner">
+
+          <div class="welcome-hero">
+            <div class="hero-hex">
+              <svg width="48" height="48" viewBox="0 0 18 18" fill="none"><path d="M9 1L16 5V13L9 17L2 13V5L9 1Z" fill="var(--accent)"/><path d="M9 5L13 7.5V12.5L9 15L5 12.5V7.5L9 5Z" fill="var(--bg)" fill-opacity="0.35"/></svg>
+            </div>
+            <h1 class="welcome-title">What do you want to know?</h1>
+            <p class="welcome-sub">Upload documents. Ask questions. Get precise answers — powered by vector search and AI.</p>
+          </div>
+
+          <div class="how-cards">
+            <div class="how-card">
+              <div class="how-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+              </div>
+              <div class="how-card-text">
+                <strong>Upload</strong>
+                <span>Add .txt, .md, or .pdf files via the Upload tab</span>
+              </div>
+            </div>
+            <div class="how-card">
+              <div class="how-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+              </div>
+              <div class="how-card-text">
+                <strong>Index</strong>
+                <span>Vectoryn processes and embeds your content automatically</span>
+              </div>
+            </div>
+            <div class="how-card">
+              <div class="how-card-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              </div>
+              <div class="how-card-text">
+                <strong>Ask</strong>
+                <span>Search by meaning — not just keywords</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="suggestions-grid">
+            <button class="suggestion-chip" onclick="useSuggestion(this)">What is the main point of this document?</button>
+            <button class="suggestion-chip" onclick="useSuggestion(this)">Summarize key points in 3 paragraphs</button>
+            <button class="suggestion-chip" onclick="useSuggestion(this)">What information is available about pricing?</button>
+            <button class="suggestion-chip" onclick="useSuggestion(this)">Are there any dates or deadlines mentioned?</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Area -->
+      <div class="chat-area hidden" id="chatArea">
+        <div class="messages" id="chatBox"></div>
+      </div>
+
+      <!-- Input Bar -->
+      <div class="input-bar" id="inputBar">
+        <div class="input-container">
+          <div class="input-wrap" id="inputWrap">
+            <textarea
+              id="chatQuery"
+              class="query-input"
+              placeholder="Ask something about your documents…"
+              rows="1"
+              onkeydown="handleKey(event)"
+              oninput="autoResize(this)"
+            ></textarea>
+            <button id="searchBtn" class="send-btn" onclick="handleSearch()" aria-label="Send">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+          <div class="input-footer">
+            <span id="streamStatus" class="stream-indicator hidden">
+              <span class="pulse-ring"></span>
+              Generating…
+            </span>
+            <span class="input-hint">Enter to send · Shift+Enter for new line</span>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
 
   <script src="config.js"></script>
   <script src="app.js"></script>
