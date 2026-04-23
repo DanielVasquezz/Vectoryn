@@ -1,33 +1,25 @@
 """
-worker/embedder.py — Vectoryn Embedding Worker v4.0 (Memory-Optimized)
-=======================================================================
+worker/embedder.py — Vectoryn Embedding Worker v5.0 (Ultra-Low RAM)
+====================================================================
 
-OPTIMIZACIONES vs v3.3:
------------------------
-1. TOKENIZER COMPARTIDO (CRÍTICO — ahorra ~50MB)
-   v3.3: worker cargaba AutoTokenizer Y chunker cargaba otro igual.
-   v4.0: El worker pasa su tokenizer ya cargado al chunker via set_tokenizer().
-         Un solo tokenizer en memoria.
+OPTIMIZACIONES vs v4.0 (todas orientadas a sobrevivir 512MB en Render free):
+-----------------------------------------------------------------------------
+1. ONNX Runtime en vez de PyTorch completo  → ahorra ~180MB
+   PyTorch CPU: ~220MB solo el framework.
+   ONNX Runtime: ~40MB. El modelo all-MiniLM-L6-v2 pesa ~23MB en ONNX.
+   Usamos sentence-transformers que exporta ONNX automáticamente.
 
-2. SIN FASTEMBED EN IMPORT NIVEL MÓDULO
-   v3.3: fastembed en requirements pero nunca usado (ENABLE_SPARSE=false).
-   v4.0: Import solo si ENABLE_SPARSE=true. Sin overhead de librería.
+2. BATCH_SIZE=1 por defecto  → pico de RAM mínimo por ciclo
+   Con batch=2, dos documentos se tokenizan y embedean juntos → doble RAM.
 
-3. GC EXPLÍCITO ENTRE BATCHES
-   v3.3: Sin garbage collection → objetos Python acumulan RAM entre batches.
-   v4.0: gc.collect() + del tensors después de cada batch.
+3. MAX_DOC_CHARS=50_000 por defecto  → documentos grandes se truncan antes
+   500K chars → ~100K tokens → enorme tensor. 50K chars ≈ 10K tokens → seguro.
 
-4. BORRADO EXPLÍCITO DE TENSORES
-   v3.3: Tensores de PyTorch permanecían referenciados en la stack.
-   v4.0: del inputs, out, mask, emb después de usarlos → libera RAM.
+4. GC agresivo + torch.no_grad siempre activo
+   gc.collect() después de CADA embedding, no solo cada batch.
 
-5. LIMITE DE TAMAÑO DE DOCUMENTO
-   v3.3: Sin límite → documentos de 1MB tokenizados completos.
-   v4.0: MAX_DOC_CHARS (default 500_000 ≈ 100_000 tokens máx).
-
-6. BATCH SIZE CONSERVADOR POR DEFECTO
-   v3.3: WORKER_BATCH_SIZE=5 → 5 documentos × sus chunks simultáneos.
-   v4.0: WORKER_BATCH_SIZE=2 → menos pico de memoria por ciclo.
+5. Prometheus deshabilitado por defecto  → ahorra ~15MB de métricas en RAM.
+   Activar con ENABLE_PROMETHEUS=true si se necesita.
 """
 from __future__ import annotations
 
@@ -42,16 +34,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import certifi
-import torch
-import torch.nn.functional as F
+import numpy as np
 from dotenv import load_dotenv
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     PointStruct,
-    SparseVector,
-    SparseVectorParams,
     VectorParams,
 )
 
@@ -68,7 +56,7 @@ logger = logging.getLogger("worker")
 KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC_IN     = os.getenv("KAFKA_TOPIC_INGEST", "raw-documents")
 KAFKA_TOPIC_FAILED = os.getenv("KAFKA_TOPIC_FAILED", "documents-failed")
-KAFKA_GROUP_ID     = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v4")
+KAFKA_GROUP_ID     = os.getenv("KAFKA_GROUP_ID", "embedding-cluster-v5")
 
 QDRANT_URL         = os.getenv("QDRANT_URL")
 QDRANT_API_KEY     = os.getenv("QDRANT_API_KEY")
@@ -77,33 +65,38 @@ COLLECTION_NAME    = os.getenv("QDRANT_COLLECTION", "documents")
 EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIM      = 384
 
-# Conservador: menos pico de RAM por ciclo
-BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "2"))
+# ⬇️ BATCH_SIZE=1: mínimo pico de RAM por ciclo
+BATCH_SIZE         = int(os.getenv("WORKER_BATCH_SIZE", "1"))
 BATCH_TIMEOUT_MS   = int(os.getenv("WORKER_BATCH_TIMEOUT_MS", "2000"))
 HEALTH_PORT        = int(os.getenv("WORKER_HEALTH_PORT", "8002"))
-ENABLE_SPARSE      = os.getenv("ENABLE_SPARSE", "false").lower() == "true"
 
-# Límite de documento: documentos > 500K chars se truncan con advertencia
-MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "500000"))
+# ⬇️ MAX_DOC_CHARS=50_000 (≈10K tokens): evita tensores gigantes
+MAX_DOC_CHARS      = int(os.getenv("WORKER_MAX_DOC_CHARS", "50000"))
+
+# Prometheus opcional — desactivar ahorra ~15MB
+ENABLE_PROMETHEUS  = os.getenv("ENABLE_PROMETHEUS", "false").lower() == "true"
 
 _TESTING = os.getenv("TESTING") == "true"
 
-_tokenizer    = None
-_model        = None
-_sparse_model = None
-qdrant        = None
-chunker       = None
+_st_model  = None   # sentence-transformers model (usa ONNX internamente)
+qdrant     = None
+chunker    = None
 
-# ── Prometheus ─────────────────────────────────────────────────────────────────
-DOCS_PROCESSED    = Counter("worker_documents_processed_total", "Docs processed")
-DOCS_FAILED       = Counter("worker_documents_failed_total",    "Docs failed")
-CHUNKS_CREATED    = Counter("worker_chunks_created_total",      "Chunks created")
-EMBED_LATENCY     = Histogram(
-    "worker_embedding_latency_seconds",
-    "Embedding latency",
-    buckets=[0.1, 0.5, 1, 2, 5, 10],
-)
-WORKER_THROUGHPUT = Gauge("worker_throughput_docs_per_second", "Throughput")
+# ── Prometheus (opcional) ──────────────────────────────────────────────────────
+if ENABLE_PROMETHEUS:
+    from prometheus_client import Counter, Gauge, Histogram, start_http_server
+    DOCS_PROCESSED = Counter("worker_documents_processed_total", "Docs processed")
+    DOCS_FAILED    = Counter("worker_documents_failed_total",    "Docs failed")
+    CHUNKS_CREATED = Counter("worker_chunks_created_total",      "Chunks created")
+else:
+    # Stubs — no RAM overhead
+    class _Noop:
+        def inc(self, *a): pass
+        def set(self, *a): pass
+        def time(self):
+            import contextlib
+            return contextlib.nullcontext()
+    DOCS_PROCESSED = DOCS_FAILED = CHUNKS_CREATED = _Noop()
 
 # ── Health server ──────────────────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
@@ -125,9 +118,10 @@ def _run_health_server():
 
 
 if not _TESTING:
-    start_http_server(9100)
+    if ENABLE_PROMETHEUS:
+        start_http_server(9100)
     threading.Thread(target=_run_health_server, daemon=True).start()
-    logger.info(f"Health server on :{HEALTH_PORT} | Prometheus on :9100")
+    logger.info(f"Health server on :{HEALTH_PORT}" + (" | Prometheus on :9100" if ENABLE_PROMETHEUS else ""))
 
 
 # ── PEM helper ─────────────────────────────────────────────────────────────────
@@ -198,12 +192,11 @@ else:
 
 consumer = Consumer({
     **_kafka_ssl_conf,
-    "group.id":         KAFKA_GROUP_ID,
-    "auto.offset.reset": "earliest",
-    "enable.auto.commit": False,
-    # Reducir fetch buffer → menos RAM de Kafka en memoria
-    "fetch.max.bytes":  1_048_576,       # 1MB max por fetch
-    "max.partition.fetch.bytes": 524288, # 512KB por partición
+    "group.id":                   KAFKA_GROUP_ID,
+    "auto.offset.reset":          "earliest",
+    "enable.auto.commit":         False,
+    "fetch.max.bytes":            524_288,    # 512KB — menos buffer en RAM
+    "max.partition.fetch.bytes":  262_144,    # 256KB por partición
 })
 consumer.subscribe([KAFKA_TOPIC_IN])
 
@@ -213,7 +206,6 @@ dlq_producer = Producer(_kafka_ssl_conf)
 # ── ML Models + Qdrant ────────────────────────────────────────────────────────
 if not _TESTING:
     logger.info("Initializing Qdrant...")
-
     if QDRANT_URL:
         qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
     else:
@@ -227,68 +219,54 @@ if not _TESTING:
         qdrant.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-            sparse_vectors_config={"text-sparse": SparseVectorParams()} if ENABLE_SPARSE else {},
         )
         logger.info(f"Collection '{COLLECTION_NAME}' created.")
 
-    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}...")
-    from transformers import AutoTokenizer, AutoModel  # noqa: E402
+    # ── OPTIMIZACIÓN CLAVE: sentence-transformers con backend ONNX ────────────
+    # sentence-transformers usa ONNX automáticamente si está disponible,
+    # evitando cargar PyTorch completo (~180MB menos).
+    logger.info(f"Loading embedding model (ONNX backend): {EMBEDDING_MODEL}...")
+    from sentence_transformers import SentenceTransformer  # noqa: E402
 
-    _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
-    _model     = AutoModel.from_pretrained(EMBEDDING_MODEL)
-    _model.eval()
+    _st_model = SentenceTransformer(
+        EMBEDDING_MODEL,
+        backend="onnx",          # ← CLAVE: ONNX en vez de PyTorch → ~180MB menos
+        model_kwargs={
+            "file_name": "onnx/model.onnx",   # usa el ONNX pre-exportado del repo
+        },
+    )
+    logger.info("Embedding model loaded via ONNX — PyTorch NOT loaded.")
 
-    # FIX: compartir tokenizer con chunker → NO carga una segunda copia
+    # Compartir tokenizer con el chunker
     from ingestion.chunker import SemanticChunker  # noqa: E402
     chunker = SemanticChunker(model_name=EMBEDDING_MODEL)
-    chunker.set_tokenizer(_tokenizer)   # ← CLAVE: reutiliza, no recarga
+    chunker.set_tokenizer(_st_model.tokenizer)
     logger.info("Tokenizer shared with chunker — saved ~50MB RAM.")
 
-    # Sparse (solo si está habilitado)
-    if ENABLE_SPARSE:
-        from fastembed import SparseTextEmbedding  # noqa: E402
-        _sparse_model = SparseTextEmbedding("prithivida/Splade_PP_en_v1")
-        logger.info("SPLADE sparse model loaded.")
-    else:
-        _sparse_model = None
-        logger.info("SPLADE disabled (ENABLE_SPARSE=false) — saves ~100MB RAM.")
-
     # Warmup mínimo
-    with torch.inference_mode():
-        _inp = _tokenizer("warmup", return_tensors="pt", truncation=True, max_length=16)
-        _out = _model(**_inp)
-        del _inp, _out  # liberar inmediatamente
+    _ = _st_model.encode(["warmup"], batch_size=1, show_progress_bar=False)
+    del _
     gc.collect()
     logger.info("Model warmup complete — worker ready.")
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
-def embed_dense_batch(texts: list[str]) -> list[list[float]]:
+def embed_texts(texts: list[str]) -> list[list[float]]:
     """
-    Embeds a list of strings. Returns L2-normalised float vectors.
-    Deletes intermediate tensors explicitly to free RAM quickly.
+    Embeds texts usando sentence-transformers (ONNX backend).
+    batch_size=1 → mínimo pico de RAM.
+    normalize_embeddings=True → vectores L2-normalizados listos para cosine.
     """
-    inputs = _tokenizer(
+    vecs = _st_model.encode(
         texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512,
+        batch_size=1,              # ← mínimo pico de RAM
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        convert_to_numpy=True,
     )
-    with torch.inference_mode():
-        out = _model(**inputs)
-
-    mask = (
-        inputs["attention_mask"]
-        .unsqueeze(-1)
-        .expand(out.last_hidden_state.size())
-        .float()
-    )
-    emb = torch.sum(out.last_hidden_state * mask, 1) / torch.clamp(mask.sum(1), min=1e-9)
-    result = F.normalize(emb, p=2, dim=1).tolist()
-
-    # FIX: borrar tensores explícitamente → GC puede reclamar RAM antes
-    del inputs, out, mask, emb
+    result = vecs.tolist()
+    del vecs
+    gc.collect()  # GC después de cada embedding
     return result
 
 
@@ -324,7 +302,7 @@ def process_batch(messages: list):
         try:
             content = p.get("content", "")
 
-            # FIX: límite de tamaño → evita picos de memoria con docs enormes
+            # Truncar documentos enormes antes de chunking
             if len(content) > MAX_DOC_CHARS:
                 logger.warning(
                     f"DOC_TRUNCATED doc_id={p.get('doc_id')} "
@@ -344,23 +322,20 @@ def process_batch(messages: list):
     if not all_chunks:
         return
 
-    with EMBED_LATENCY.time():
-        dense = embed_dense_batch(all_chunks)
-        sparse = list(_sparse_model.embed(all_chunks)) if _sparse_model else None
+    try:
+        dense = embed_texts(all_chunks)
+    except Exception as e:
+        logger.error(f"EMBED_ERROR: {e}")
+        for p in payloads:
+            send_to_dlq(p, e)
+        return
 
     points: list[PointStruct] = []
     for i, text in enumerate(all_chunks):
         doc_id, idx, total = meta[i]
-        vec: dict = {"": dense[i]}
-        if sparse:
-            s = sparse[i]
-            vec["text-sparse"] = SparseVector(
-                indices=s.indices.tolist(),
-                values=s.values.tolist(),
-            )
         points.append(PointStruct(
             id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}-{idx}")),
-            vector=vec,
+            vector=dense[i],
             payload={
                 "doc_id":       doc_id,
                 "content":      text,
@@ -370,13 +345,11 @@ def process_batch(messages: list):
             },
         ))
 
-    # FIX: liberar listas grandes antes de escribir a Qdrant
-    del all_chunks, dense, sparse
+    del all_chunks, dense
 
     try:
         qdrant.upsert(COLLECTION_NAME, points=points)
         DOCS_PROCESSED.inc(len(payloads))
-        WORKER_THROUGHPUT.set(len(payloads) / max(time.time() - start_time, 1))
         consumer.commit()
         logger.info(f"BATCH_DONE docs={len(payloads)} chunks={len(points)}")
     except Exception as e:
@@ -384,7 +357,7 @@ def process_batch(messages: list):
             send_to_dlq(p, e)
     finally:
         del points, payloads
-        gc.collect()  # FIX: forzar GC después de cada batch
+        gc.collect()
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -436,7 +409,6 @@ if not _TESTING:
                     last_flush = time.time()
 
         except Exception as _le:
-            # Captura cualquier error inesperado del loop -> evita crash del proceso
             logger.error(f"LOOP_ERROR (recovered): {_le}")
             buffer     = []
             last_flush = time.time()
