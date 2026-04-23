@@ -202,8 +202,7 @@ function useSuggestion(btn) {
 async function handleIngest() {
   const contentEl = $('docContent');
   const docIdEl   = $('docId');
-  // Use _pendingContent (from file upload) if the textarea is empty
-  const content   = contentEl?.value?.trim() || _pendingContent?.trim();
+  const content   = contentEl?.value?.trim();
   const docId     = docIdEl?.value?.trim();
   const btn       = $('ingestBtn');
   const btnText   = $('ingestBtnText');
@@ -253,8 +252,6 @@ async function handleIngest() {
     $('stat-ingested').textContent = state.ingestCount;
     addDocToList(data.doc_id || payload.id, content.length);
     contentEl.value = '';
-    contentEl.placeholder = 'Paste your document content here, or upload a file above…';
-    _pendingContent = '';
     docIdEl.value   = '';
     onContentInput(contentEl);
 
@@ -301,9 +298,7 @@ function showFeedback(msg, type) {
 
 function onContentInput(el) {
   const cc = $('charCount');
-  // If user typed something, clear pending file content
-  if (el.value.trim()) _pendingContent = '';
-  const len = (_pendingContent || el.value).length;
+  const len = el.value.length;
   if (cc) {
     cc.textContent = len.toLocaleString() + ' chars';
     cc.classList.toggle('warn', len > 1_500_000);
@@ -349,9 +344,6 @@ function onFileSelect(e) {
   if (file) validateFile(file);
 }
 
-// Hidden content buffer — stores extracted text without polluting the UI
-let _pendingContent = '';
-
 function validateFile(file) {
   const ext = '.' + file.name.split('.').pop().toLowerCase();
   if (!['.txt','.md','.pdf'].includes(ext)) {
@@ -363,84 +355,15 @@ function validateFile(file) {
     return;
   }
   if (file.size === 0) { showFeedback('File is empty.', 'error'); return; }
-
-  const docIdEl = $('docId');
-  const baseName = file.name.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').slice(0, 100);
-  if (docIdEl) docIdEl.value = baseName;
-
-  if (ext === '.pdf') {
-    _loadPDF(file);
-  } else {
-    const reader = new FileReader();
-    reader.onload = ev => {
-      _setContent(ev.target.result, file.name, file.size);
-    };
-    reader.onerror = () => showFeedback('Error reading file.', 'error');
-    reader.readAsText(file);
-  }
-}
-
-function _setContent(text, fileName, fileSize) {
-  _pendingContent = text;
-
-  // Show a clean placeholder — never dump raw content into the textarea
-  const contentEl = $('docContent');
-  if (contentEl) {
-    contentEl.value = '';                   // keep textarea empty
-    contentEl.placeholder = `✓ "${fileName}" ready (${(fileSize/1024).toFixed(1)} KB, ${text.length.toLocaleString()} chars extracted). Click Index Document.`;
-  }
-
-  // Update char counter using actual extracted length
-  const cc = $('charCount');
-  if (cc) {
-    cc.textContent = text.length.toLocaleString() + ' chars';
-    cc.classList.toggle('warn', text.length > 1_500_000);
-    cc.classList.toggle('over', text.length > 2_000_000);
-  }
-
-  showFeedback(`"${esc(fileName)}" loaded — ${text.length.toLocaleString()} chars extracted. Click Index Document.`, 'success');
-}
-
-async function _loadPDF(file) {
-  showFeedback('Extracting text from PDF…', '');
-
-  // Load PDF.js from CDN if not already present
-  if (!window.pdfjsLib) {
-    await new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  }
-
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const pages = [];
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const tokenized = await page.getTextContent();
-      const pageText = tokenized.items.map(item => item.str).join(' ');
-      pages.push(pageText);
-    }
-
-    const fullText = pages.join('\n\n').trim();
-
-    if (!fullText) {
-      showFeedback('PDF appears to be scanned or image-only — no text could be extracted.', 'error');
-      return;
-    }
-
-    _setContent(fullText, file.name, file.size);
-
-  } catch (err) {
-    showFeedback('Failed to read PDF: ' + err.message, 'error');
-  }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    $('docContent').value = ev.target.result;
+    $('docId').value = file.name.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').slice(0, 100);
+    onContentInput($('docContent'));
+    showFeedback(`"${esc(file.name)}" loaded (${(file.size/1024).toFixed(1)} KB). Click Index Document.`, 'success');
+  };
+  reader.onerror = () => showFeedback('Error reading file.', 'error');
+  reader.readAsText(file);
 }
 
 // ── SEARCH ────────────────────────────────────────────
@@ -694,3 +617,146 @@ document.addEventListener('DOMContentLoaded', () => {
   // Focus input
   $('chatQuery')?.focus();
 });
+
+// ── MANAGE DOCUMENTS ──────────────────────────────────────────────────────────
+
+async function loadDocuments() {
+  const list = $('manageDocsList');
+  if (!list) return;
+
+  list.innerHTML = '<div class="manage-docs-empty"><span>Loading…</span></div>';
+
+  try {
+    const res = await fetch(`${CONFIG.GATEWAY_URL}/documents`, {
+      headers: { 'X-API-Key': CONFIG.API_KEY },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    const { documents } = await res.json();
+
+    if (!documents || documents.length === 0) {
+      list.innerHTML = '<div class="manage-docs-empty"><span>No documents indexed yet</span></div>';
+      return;
+    }
+
+    list.innerHTML = documents.map(doc => `
+      <div class="manage-doc-item" id="doc-item-${esc(doc.doc_id)}">
+        <div class="manage-doc-name" title="${esc(doc.doc_id)}">${esc(doc.doc_id)}</div>
+        <div class="manage-doc-meta">${doc.chunks} chunk${doc.chunks !== 1 ? 's' : ''}</div>
+        <button class="btn-delete-doc" onclick="confirmDelete('${esc(doc.doc_id)}', ${doc.chunks})" title="Delete document">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+          </svg>
+        </button>
+      </div>
+    `).join('');
+
+  } catch (err) {
+    list.innerHTML = `<div class="manage-docs-empty"><span>Error: ${esc(err.message)}</span></div>`;
+  }
+}
+
+function confirmDelete(docId, chunks) {
+  // Verificar si el servicio de search está disponible
+  if (state.serviceStatus.search === false) {
+    _showNoSpaceBanner('El servicio de búsqueda no está disponible. No se puede eliminar ahora.');
+    return;
+  }
+
+  // Crear overlay de confirmación
+  const overlay = document.createElement('div');
+  overlay.className = 'delete-confirm-overlay';
+  overlay.id = 'deleteConfirmOverlay';
+  overlay.innerHTML = `
+    <div class="delete-confirm-box">
+      <h3>¿Eliminar documento?</h3>
+      <p>
+        Se eliminarán <strong>${chunks} chunk${chunks !== 1 ? 's' : ''}</strong> del documento
+        <strong>"${esc(docId)}"</strong> de la base de datos vectorial.<br><br>
+        Esta acción no se puede deshacer.
+      </p>
+      <div id="deleteErrorMsg"></div>
+      <div class="delete-confirm-actions">
+        <button class="btn-cancel-delete" onclick="closeDeleteConfirm()">Cancelar</button>
+        <button class="btn-confirm-delete" id="btnConfirmDelete" onclick="executeDelete('${esc(docId)}')">
+          Eliminar
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Cerrar con click fuera
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) closeDeleteConfirm();
+  });
+}
+
+function closeDeleteConfirm() {
+  document.getElementById('deleteConfirmOverlay')?.remove();
+}
+
+async function executeDelete(docId) {
+  const btn = $('btnConfirmDelete');
+  if (btn) { btn.disabled = true; btn.textContent = 'Eliminando…'; }
+
+  try {
+    const res = await fetch(`${CONFIG.GATEWAY_URL}/document/${encodeURIComponent(docId)}`, {
+      method: 'DELETE',
+      headers: { 'X-API-Key': CONFIG.API_KEY },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (res.status === 503) {
+      // Servicio no disponible — no tiene espacio / está caído
+      closeDeleteConfirm();
+      _showNoSpaceBanner('El sistema no puede procesar la eliminación ahora mismo. Intenta de nuevo en unos segundos.');
+      return;
+    }
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Error ${res.status}`);
+    }
+
+    closeDeleteConfirm();
+
+    // Quitar el item de la lista visualmente sin recargar todo
+    document.getElementById(`doc-item-${docId}`)?.remove();
+
+    // Si la lista queda vacía, mostrar mensaje
+    const list = $('manageDocsList');
+    if (list && list.children.length === 0) {
+      list.innerHTML = '<div class="manage-docs-empty"><span>No documents indexed yet</span></div>';
+    }
+
+    showFeedback(`✓ Documento "${docId}" eliminado correctamente.`, 'success');
+
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Eliminar'; }
+    const errEl = $('deleteErrorMsg');
+    if (errEl) {
+      errEl.innerHTML = `<div class="no-space-banner">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        ${esc(err.message)}
+      </div>`;
+    }
+  }
+}
+
+function _showNoSpaceBanner(msg) {
+  const list = $('manageDocsList');
+  if (!list) return;
+  // Quitar banner previo si existe
+  list.querySelector('.no-space-banner')?.remove();
+  const banner = document.createElement('div');
+  banner.className = 'no-space-banner';
+  banner.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    ${esc(msg)}
+  `;
+  list.prepend(banner);
+  setTimeout(() => banner.remove(), 6000);
+}
