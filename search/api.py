@@ -679,3 +679,59 @@ async def evaluate_rag_quality(payload: EvalPayload):
             "overall_min":          0.70,
         },
     }
+
+
+# ── DELETE DOCUMENT ───────────────────────────────────────────────────────────
+@app.delete("/document/{doc_id}", tags=["Pipeline"])
+async def delete_document(doc_id: str, request: Request):
+    """
+    Elimina todos los chunks de un documento de Qdrant por su doc_id.
+    Retorna cuántos puntos fueron eliminados.
+    """
+    if not _collection_exists():
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue  # noqa
+        result = qdrant.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=Filter(
+                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+            ),
+        )
+        logger.info(f"DELETE_DOC doc_id={doc_id} status={result.status}")
+        return {"status": "deleted", "doc_id": doc_id, "operation_status": str(result.status)}
+    except Exception as e:
+        logger.error(f"DELETE_ERROR doc_id={doc_id} error={e}")
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+
+@app.get("/documents", tags=["Pipeline"])
+async def list_documents(request: Request):
+    """
+    Lista todos los documentos únicos indexados en Qdrant.
+    Retorna doc_id, chunk count y timestamp del primer chunk.
+    """
+    if not _collection_exists():
+        return {"documents": []}
+
+    try:
+        # Scroll todos los puntos — solo payload, sin vectores
+        all_points, _ = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        docs: dict = {}
+        for pt in all_points:
+            did = pt.payload.get("doc_id", "unknown")
+            if did not in docs:
+                docs[did] = {"doc_id": did, "chunks": 0, "ts": pt.payload.get("ts", 0)}
+            docs[did]["chunks"] += 1
+
+        return {"documents": sorted(docs.values(), key=lambda x: x["ts"], reverse=True)}
+    except Exception as e:
+        logger.error(f"LIST_DOCS_ERROR {e}")
+        raise HTTPException(status_code=500, detail=str(e))
